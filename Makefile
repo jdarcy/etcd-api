@@ -3,7 +3,7 @@ TARGET	= etcd-test
 CFLAGS	= -DDEBUG -g -O0
 
 TARGET: $(OBJECTS)
-	$(CC) $(OBJECTS) -lcurl -o $(TARGET)
+	$(CC) $(OBJECTS) -lcurl -lyajl -o $(TARGET)
 
 clean:
 	rm -f $(OBJECTS)
