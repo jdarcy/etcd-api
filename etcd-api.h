@@ -86,3 +86,14 @@ char *          etcd_get (etcd_session this, char *key);
 
 etcd_result     etcd_set        (etcd_session this, char *key, char *value,
                                  char *precond, unsigned int ttl);
+
+
+
+/*
+ * etcd_leader
+ *
+ * Get the identify of the current leader.
+ */
+
+char *
+etcd_leader (etcd_session this_as_void);

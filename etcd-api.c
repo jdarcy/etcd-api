@@ -10,6 +10,8 @@ typedef struct {
         etcd_server     *servers;
 } _etcd_session;
 
+typedef size_t curl_callback_t (void *, size_t, size_t, void *);
+
 int g_inited = 0;
 
 #if defined(DEBUG)
@@ -83,7 +85,8 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 char *
-etcd_get_one (_etcd_session *this, char *key, etcd_server *srv)
+etcd_get_one (_etcd_session *this, char *key, etcd_server *srv,
+              char *prefix, curl_callback_t cb)
 {
         char            *url;
         CURL            *curl;
@@ -92,8 +95,8 @@ etcd_get_one (_etcd_session *this, char *key, etcd_server *srv)
         ssize_t         n_read          = -1;
         void            *err_label      = &&done;
 
-        if (asprintf(&url,"http://%s:%u/v1/keys/%s",
-                     srv->host,srv->port,key) < 0) {
+        if (asprintf(&url,"http://%s:%u/v1/%s%s",
+                     srv->host,srv->port,prefix,key) < 0) {
                 goto *err_label;
         }
         err_label = &&free_url;
@@ -107,7 +110,7 @@ etcd_get_one (_etcd_session *this, char *key, etcd_server *srv)
         /* TBD: add error checking for these */
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
-        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_get_response);
+        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,cb);
         curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
 
@@ -139,8 +142,34 @@ etcd_get (etcd_session this_as_void, char *key)
         char            *res;
 
         for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_get_one(this,key,srv);
-                if (res >= 0) {
+                res = etcd_get_one(this,key,srv,"keys/",parse_get_response);
+                if (res) {
+                        return res;
+                }
+        }
+
+        return NULL;
+}
+
+
+size_t
+store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
+{
+        *((char **)stream) = strdup(ptr);
+        return size * nmemb;
+}
+
+
+char *
+etcd_leader (etcd_session this_as_void)
+{
+        _etcd_session   *this   = this_as_void;
+        etcd_server     *srv;
+        char            *res;
+
+        for (srv = this->servers; srv->host; ++srv) {
+                res = etcd_get_one(this,"leader",srv,"",store_leader);
+                if (res) {
                         return res;
                 }
         }

@@ -5,11 +5,36 @@
 #include "etcd-api.h"
 
 etcd_server my_servers[] = {
-        { "localhost",  4001 },
-        { "localhost",  4002 },
-        { "localhost",  4003 },
+        { "gfs1",  4001 },
+        { "gfs1",  4002 },
+        { "gfs1",  4003 },
         { NULL }
 };
+
+int
+do_leader (void)
+{
+        etcd_session    sess;
+        char            *value;       
+
+        printf("finding leader\n");
+
+        sess = etcd_open(my_servers);
+        if (!sess) {
+                fprintf(stderr,"etcd_open failed\n");
+                return !0;
+        }
+
+        value = etcd_leader(sess);
+        if (!value) {
+                fprintf(stderr,"etcd_leader failed\n");
+                return !0;
+        }
+
+        printf("leader is %s\n",value);
+        free(value);
+        return 0;
+}
 
 int
 do_get (char *key)
@@ -82,7 +107,8 @@ struct option my_opts[] = {
 int
 print_usage (char *prog)
 {
-        fprintf (stderr, "Usage: %s get-key\n",prog);
+        fprintf (stderr, "Usage: %s # shows leader",prog);
+        fprintf (stderr, "       %s get-key\n",prog);
         fprintf (stderr, "       %s [-p precond] [-t ttl] set-key value\n",
                  prog);
         return !0;
@@ -113,6 +139,11 @@ main (int argc, char **argv)
         }
 
         switch (argc - optind) {
+        case 0:
+                if (precond || ttl) {
+                        return print_usage(argv[0]);
+                }
+                return do_leader();
         case 1:
                 if (precond || ttl) {
                         return print_usage(argv[0]);
