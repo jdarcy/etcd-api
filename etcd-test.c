@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <yajl/yajl_tree.h>
 #include "etcd-api.h"
 
 etcd_server my_servers[] = {
@@ -15,11 +14,8 @@ etcd_server my_servers[] = {
 int
 do_get (char *key)
 {
-        etcd_session            sess;
-        char                    buf[256];
-        yajl_val                node;
-        yajl_val                value;
-        static const char       *path[] = { "value", NULL };
+        etcd_session    sess;
+        char            *value;       
 
         printf("getting %s\n",key);
 
@@ -29,21 +25,14 @@ do_get (char *key)
                 return !0;
         }
 
-        memset(buf,0,sizeof(buf));
-        if (etcd_get(sess,key,buf,sizeof(buf)-1) < 0) {
+        value = etcd_get(sess,key);
+        if (!value) {
                 fprintf(stderr,"etcd_get failed\n");
                 return !0;
         }
 
-        node = yajl_tree_parse(buf,NULL,0);
-        if (node) {
-                value = yajl_tree_get(node,path,yajl_t_string);
-                if (value) {
-                        printf("value = %s\n",YAJL_GET_STRING(value));
-                }
-                yajl_tree_free(node);
-        }
-
+        printf("got value: %s\n",value);
+        free(value);
         return 0;
 }
 
@@ -66,6 +55,14 @@ do_set (char *key, char *value, char *precond, char *ttl)
                 fprintf(stderr,"etcd_open failed\n");
                 return -1;
         }
+
+        /*
+         * It probably seems a bit silly to convert from a string to number
+         * when we're going to do the exact opposite in etcd_set, but this is
+         * just a test program.  In real API usage we're more likely to have
+         * a number in hand.
+         */
+        ttl_num = strtoul(ttl,NULL,10);
 
         if (etcd_set(sess,key,value,precond,ttl_num) != ETCD_OK) {
                 fprintf(stderr,"etcd_set failed\n");

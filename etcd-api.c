@@ -2,18 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <curl/curl.h>
+#include <yajl/yajl_tree.h>
 #include "etcd-api.h"
 
 
 typedef struct {
         etcd_server     *servers;
 } _etcd_session;
-
-typedef struct {
-        void            *ptr;
-        size_t          max;
-        size_t          res;
-} etcd_buffer;
 
 int g_inited = 0;
 
@@ -61,30 +56,41 @@ etcd_close (etcd_session this)
 
 
 size_t
-write_data (void *ptr, size_t size, size_t nmemb, void *stream)
+parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
-        etcd_buffer     *ebuf   = stream;
+        yajl_val        node;
+        yajl_val        value;
+        static const char       *path[] = { "value", NULL };
 
-        ebuf->res = size * nmemb;
-        if (ebuf->res > ebuf->max) {
-                ebuf->res = ebuf->max;
+        node = yajl_tree_parse(ptr,NULL,0);
+        if (node) {
+                value = yajl_tree_get(node,path,yajl_t_string);
+                if (value) {
+                        /* 
+                         * YAJL probably copied it once, now we're going to
+                         * copy it again.  If anybody really cares for such
+                         * small and infrequently used values, we'd have to do
+                         * do something much more complicated (like using the
+                         * stream interface) to avoid the copy.  Right now it's
+                         * just not worth it.
+                         */
+                        *((char **)stream) = strdup(YAJL_GET_STRING(value));
+                }
         }
 
-        memcpy(ebuf->ptr,ptr,ebuf->res);
-        return ebuf->res;
+        return size*nmemb;
 }
 
 
-ssize_t
-etcd_get_one (_etcd_session *this, char *key, void *buf, size_t len,
-              etcd_server *srv)
+char *
+etcd_get_one (_etcd_session *this, char *key, etcd_server *srv)
 {
         char            *url;
         CURL            *curl;
-        CURLcode        res;
+        CURLcode        curl_res;
+        char            *res            = NULL;
         ssize_t         n_read          = -1;
         void            *err_label      = &&done;
-        etcd_buffer     ebuf;
 
         if (asprintf(&url,"http://%s:%u/v1/keys/%s",
                      srv->host,srv->port,key) < 0) {
@@ -101,51 +107,70 @@ etcd_get_one (_etcd_session *this, char *key, void *buf, size_t len,
         /* TBD: add error checking for these */
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
-        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,write_data);
+        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_get_response);
+        curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+        curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
 
-        ebuf.ptr = buf;
-        ebuf.max = len;
-        ebuf.res = 0;
-        curl_easy_setopt(curl,CURLOPT_WRITEDATA,&ebuf);
-
-        res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-                print_curl_error("perform",res);
+        curl_res = curl_easy_perform(curl);
+        if (curl_res != CURLE_OK) {
+                print_curl_error("perform",curl_res);
                 goto *err_label;
         }
 
-        n_read = ebuf.res;
+        /*
+         * If the request succeeded, parse_get_response should have set res for
+         * us.
+         */
 
 cleanup_curl:
         curl_easy_cleanup(curl);
 free_url:
         free(url);
 done:
-        return n_read;
+        return res;
 }
 
 
-ssize_t
-etcd_get (etcd_session this_as_void, char *key, void *buf, size_t len)
+char *
+etcd_get (etcd_session this_as_void, char *key)
 {
         _etcd_session   *this   = this_as_void;
         etcd_server     *srv;
-        ssize_t         n_read;
+        char            *res;
 
         for (srv = this->servers; srv->host; ++srv) {
-                n_read = etcd_get_one(this,key,buf,len,srv);
-                if (n_read >= 0) {
-                        return n_read;
+                res = etcd_get_one(this,key,srv);
+                if (res >= 0) {
+                        return res;
                 }
         }
 
-        return -1;
+        return NULL;
 }
 
 
 size_t
-do_nothing (void *ptr, size_t size, size_t nmemb, void *stream)
+parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
+        yajl_val        node;
+        yajl_val        value;
+        etcd_result     res     = ETCD_PROTOCOL_ERROR;
+        /*
+         * Success responses contain prevValue and index.  Failure responses
+         * contain errorCode and cause.  Among all these, index seems to be the
+         * one we're most likely to need later, so look for that.
+         */
+        static const char       *path[] = { "index", NULL };
+
+        node = yajl_tree_parse(ptr,NULL,0);
+        if (node) {
+                value = yajl_tree_get(node,path,yajl_t_number);
+                if (value) {
+                        res = ETCD_OK;
+                }
+        }
+
+        *((etcd_result *)stream) = res;
         return size*nmemb;
 }
 
@@ -172,7 +197,23 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
         }
         err_label = &&free_contents;
 
-        /* TBD: precond, ttl */
+        if (precond) {
+                char *c2;
+                if (asprintf(&c2,"%s;prevValue=%s",contents,precond) < 0) {
+                        goto *err_label;
+                }
+                free(contents);
+                contents = c2;
+        }
+
+        if (ttl) {
+                char *c2;
+                if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
+                        goto *err_label;
+                }
+                free(contents);
+                contents = c2;
+        }
 
         curl = curl_easy_init();
         if (!curl) {
@@ -183,8 +224,9 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
         /* TBD: add error checking for these */
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
-        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,do_nothing);
-        //curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_set_response);
+        curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+        curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
 
         /*
          * CURLOPT_HTTPPOST would be easier, but it looks like etcd will barf
@@ -199,7 +241,10 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
                 goto *err_label;
         }
 
-        res = ETCD_OK;
+        /*
+         * If the request succeeded, or at least got to the server and failed
+         * there, parse_set_response should have set res appropriately.
+         */
 
 cleanup_curl:
         curl_easy_cleanup(curl);
@@ -208,7 +253,7 @@ free_contents:
 free_url:
         free(url);
 done:
-        return ETCD_OK;
+        return res;
 }
 
 
@@ -218,10 +263,17 @@ etcd_set (etcd_session this_as_void, char *key, char *value,
 {
         _etcd_session   *this   = this_as_void;
         etcd_server     *srv;
+        etcd_result     res;
 
         for (srv = this->servers; srv->host; ++srv) {
-                if (etcd_put_one(this,key,value,precond,ttl,srv) == ETCD_OK) {
-                        return ETCD_OK;
+                res = etcd_put_one(this,key,value,precond,ttl,srv);
+                /*
+                 * Protocol errors are likely to be things like precondition
+                 * failures, which won't be helped by retrying on another
+                 * server.
+                 */
+                if ((res == ETCD_OK) || (res == ETCD_PROTOCOL_ERROR)) {
+                        return res;
                 }
         }
 

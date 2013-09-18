@@ -16,8 +16,9 @@
 
 typedef enum {
         ETCD_OK = 0,
-                        /* TBD: add other error categories here */
-        ETCD_WTF        /* anything we can't easily categorize */
+        ETCD_PROTOCOL_ERROR,
+                                /* TBD: add other error categories here */
+        ETCD_WTF                /* anything we can't easily categorize */
 } etcd_result;
 
 typedef struct {
@@ -53,19 +54,13 @@ void            etcd_close      (etcd_session this);
 /*
  * etcd_get
  *
- * Fetch a key from one of the servers in a session.
+ * Fetch a key from one of the servers in a session.  The return value is a
+ * newly allocated string, which must be freed by the caller.
  *
  *      key
  *      The etcd key (path) to fetch.
- *
- *      buf
- *      A buffer for the received data in the key.
- *
- *      len
- *      Length of the buffer.
  */
-ssize_t         etcd_get        (etcd_session this, char *key,
-                                 void *buf, size_t len);
+char *          etcd_get (etcd_session this, char *key);
 
 
 /*
