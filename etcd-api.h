@@ -97,3 +97,23 @@ etcd_result     etcd_delete     (etcd_session this, char *key);
  */
 
 char *          etcd_leader     (etcd_session this_as_void);
+
+
+/*
+ * TBD: add etcd_watch
+ *
+ * This is mostly like GET, but with two extra sources of complexity.  The
+ * first is that we need to parse/return a key and *maybe* a value.  We can
+ * probably signal a DELETE (instead of SET) with a NULL value, but it's still
+ * two extra parameters.  The other source of complexity is the "index"
+ * parameter, which needs to be passed both in and out.  Normally that would
+ * mean one parameter passed by reference, but there's no obvious sentinel
+ * value on input, so we need at least one more bit to indicate that no index
+ * should be passed to the server.  On the other end, we need at least one bit
+ * to indicate that no index should be passed *back* to the caller.  So yes,
+ * we can pass by reference, but then we also need a fourth extra flag
+ * parameter with ETCD_INDEX_IN and ETCD_INDEX_OUT flags to narrow things down.
+ *
+ * For now, people can just poll.  If you really want etcd_watch implemented,
+ * let me know - or earn my undying gratitude if you add it yourself.  ;)
+ */
