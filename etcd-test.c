@@ -11,44 +11,13 @@ etcd_server my_servers[] = {
         { NULL }
 };
 
-int
-do_leader (void)
-{
-        etcd_session    sess;
-        char            *value;       
-
-        printf("finding leader\n");
-
-        sess = etcd_open(my_servers);
-        if (!sess) {
-                fprintf(stderr,"etcd_open failed\n");
-                return !0;
-        }
-
-        value = etcd_leader(sess);
-        if (!value) {
-                fprintf(stderr,"etcd_leader failed\n");
-                return !0;
-        }
-
-        printf("leader is %s\n",value);
-        free(value);
-        return 0;
-}
 
 int
-do_get (char *key)
+do_get (etcd_session sess, char *key)
 {
-        etcd_session    sess;
         char            *value;       
 
         printf("getting %s\n",key);
-
-        sess = etcd_open(my_servers);
-        if (!sess) {
-                fprintf(stderr,"etcd_open failed\n");
-                return !0;
-        }
 
         value = etcd_get(sess,key);
         if (!value) {
@@ -61,10 +30,10 @@ do_get (char *key)
         return 0;
 }
 
+
 int
-do_set (char *key, char *value, char *precond, char *ttl)
+do_set (etcd_session sess, char *key, char *value, char *precond, char *ttl)
 {
-        etcd_session            sess;
         unsigned long           ttl_num = 0;
 
         printf("setting %s to %s\n",key,value);
@@ -72,22 +41,18 @@ do_set (char *key, char *value, char *precond, char *ttl)
                 printf("  precond = %s\n",precond);
         }
         if (ttl) {
-                printf("  ttl = %s\n",ttl);
+                /*
+                 * It probably seems a bit silly to convert from a string to
+                 * number when we're going to do the exact opposite in
+                 * etcd_set, but this is just a test program.  In real API
+                 * usage we're more likely to have a number in hand.
+                 */
+                ttl_num = strtoul(ttl,NULL,10);
+                printf("  ttl = %lu\n",ttl_num);
         }
-
-        sess = etcd_open(my_servers);
-        if (!sess) {
-                fprintf(stderr,"etcd_open failed\n");
-                return -1;
+        else {
+                ttl_num = 0;
         }
-
-        /*
-         * It probably seems a bit silly to convert from a string to number
-         * when we're going to do the exact opposite in etcd_set, but this is
-         * just a test program.  In real API usage we're more likely to have
-         * a number in hand.
-         */
-        ttl_num = strtoul(ttl,NULL,10);
 
         if (etcd_set(sess,key,value,precond,ttl_num) != ETCD_OK) {
                 fprintf(stderr,"etcd_set failed\n");
@@ -98,7 +63,41 @@ do_set (char *key, char *value, char *precond, char *ttl)
 }
 
 
+int
+do_delete (etcd_session sess, char *key)
+{
+        printf("deleting %s\n",key);
+
+        if (etcd_delete(sess,key) != ETCD_OK) {
+                fprintf(stderr,"etcd_delete failed\n");
+                return !0;
+        }
+
+        return 0;
+}
+
+
+int
+do_leader (etcd_session sess)
+{
+        char            *value;       
+
+        printf("finding leader\n");
+
+        value = etcd_leader(sess);
+        if (!value) {
+                fprintf(stderr,"etcd_leader failed\n");
+                return !0;
+        }
+
+        printf("leader is %s\n",value);
+        free(value);
+        return 0;
+}
+
+
 struct option my_opts[] = {
+        { "delete",     no_argument,            NULL,   'd' },
         { "precond",    required_argument,      NULL,   'p' },
         { "ttl",        required_argument,      NULL,   't' },
         { NULL }
@@ -107,26 +106,32 @@ struct option my_opts[] = {
 int
 print_usage (char *prog)
 {
-        fprintf (stderr, "Usage: %s # shows leader",prog);
-        fprintf (stderr, "       %s get-key\n",prog);
-        fprintf (stderr, "       %s [-p precond] [-t ttl] set-key value\n",
+        fprintf (stderr, "get:    %s key\n", prog);
+        fprintf (stderr, "set:    %s [-p precond] [-t ttl] key value\n",
                  prog);
+        fprintf (stderr, "delete: %s -d key\n", prog);
+        fprintf (stderr, "leader: %s\n", prog);
         return !0;
 }
 
 int
 main (int argc, char **argv)
 {
-        int                     opt;
-        char                    *precond        = NULL;
-        char                    *ttl            = NULL;
+        int             opt;
+        int             delete          = 0;
+        char            *precond        = NULL;
+        char            *ttl            = NULL;
+        etcd_session    sess;
 
         for (;;) {
-                opt = getopt_long(argc,argv,"p:t:",my_opts,NULL);
+                opt = getopt_long(argc,argv,"dp:t:",my_opts,NULL);
                 if (opt == (-1)) {
                         break;
                 }
                 switch (opt) {
+                case 'd':
+                        delete = 1;
+                        break;
                 case 'p':
                         precond = optarg;
                         break;
@@ -138,21 +143,35 @@ main (int argc, char **argv)
                 }
         }
 
-        switch (argc - optind) {
-        case 0:
-                if (precond || ttl) {
-                        return print_usage(argv[0]);
-                }
-                return do_leader();
-        case 1:
-                if (precond || ttl) {
-                        return print_usage(argv[0]);
-                }
-                return do_get(argv[optind]);
-        case 2:
-                return do_set(argv[optind],argv[optind+1],precond,ttl);
-        default:
+        if (delete && ((argc - optind) != 1)) {
                 return print_usage(argv[0]);
         }
-        
+        if ((precond || ttl) && ((argc - optind) != 2)) {
+                return print_usage(argv[0]);
+        }
+
+        sess = etcd_open(my_servers);
+        if (!sess) {
+                fprintf(stderr,"etcd_open failed\n");
+                return !0;
+        }
+
+        switch (argc - optind) {
+        case 0:
+                return do_leader(sess);
+        case 1:
+                if (delete) {
+                        return do_delete(sess,argv[optind]);
+                }
+                else {
+                        return do_get(sess,argv[optind]);
+                }
+        case 2:
+                return do_set(sess,argv[optind],argv[optind+1],precond,ttl);
+        default:
+                /* Shut up, gcc.  The real fall-through is at the end. */
+                ;
+        }
+
+        return print_usage(argv[0]);
 }

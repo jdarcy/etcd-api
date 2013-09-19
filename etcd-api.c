@@ -112,7 +112,9 @@ etcd_get_one (_etcd_session *this, char *key, etcd_server *srv,
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,cb);
         curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+#if defined(DEBUG)
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
+#endif
 
         curl_res = curl_easy_perform(curl);
         if (curl_res != CURLE_OK) {
@@ -153,32 +155,6 @@ etcd_get (etcd_session this_as_void, char *key)
 
 
 size_t
-store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
-{
-        *((char **)stream) = strdup(ptr);
-        return size * nmemb;
-}
-
-
-char *
-etcd_leader (etcd_session this_as_void)
-{
-        _etcd_session   *this   = this_as_void;
-        etcd_server     *srv;
-        char            *res;
-
-        for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_get_one(this,"leader",srv,"",store_leader);
-                if (res) {
-                        return res;
-                }
-        }
-
-        return NULL;
-}
-
-
-size_t
 parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
         yajl_val        node;
@@ -204,12 +180,13 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 }
 
 
+/* NB: a null value means to use HTTP DELETE and ignore precond/ttl */
 etcd_result
 etcd_put_one (_etcd_session *this, char *key, char *value,
               char *precond, unsigned int ttl, etcd_server *srv)
 {
         char                    *url;
-        char                    *contents;
+        char                    *contents       = NULL;
         CURL                    *curl;
         etcd_result             res             = ETCD_WTF;
         CURLcode                curl_res;
@@ -221,27 +198,30 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
         }
         err_label = &&free_url;
 
-        if (asprintf(&contents,"value=%s",value) < 0) {
-                goto *err_label;
-        }
-        err_label = &&free_contents;
-
-        if (precond) {
-                char *c2;
-                if (asprintf(&c2,"%s;prevValue=%s",contents,precond) < 0) {
+        if (value) {
+                if (asprintf(&contents,"value=%s",value) < 0) {
                         goto *err_label;
                 }
-                free(contents);
-                contents = c2;
-        }
+                err_label = &&free_contents;
 
-        if (ttl) {
-                char *c2;
-                if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
-                        goto *err_label;
+                if (precond) {
+                        char *c2;
+                        if (asprintf(&c2,"%s;prevValue=%s",contents,
+                                     precond) < 0) {
+                                goto *err_label;
+                        }
+                        free(contents);
+                        contents = c2;
                 }
-                free(contents);
-                contents = c2;
+
+                if (ttl) {
+                        char *c2;
+                        if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
+                                goto *err_label;
+                        }
+                        free(contents);
+                        contents = c2;
+                }
         }
 
         curl = curl_easy_init();
@@ -255,14 +235,21 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_set_response);
         curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+        if (value) {
+                /*
+                 * CURLOPT_HTTPPOST would be easier, but it looks like etcd
+                 * will barf on that.  Sigh.
+                 */
+                curl_easy_setopt(curl,CURLOPT_POST,1L);
+                curl_easy_setopt(curl,CURLOPT_POSTFIELDS,contents);
+        }
+        else {
+                /* This must be a DELETE. */
+                curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,"DELETE");
+        }
+#if defined(DEBUG)
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
-
-        /*
-         * CURLOPT_HTTPPOST would be easier, but it looks like etcd will barf
-         * on that.  Sigh.
-         */
-        curl_easy_setopt(curl,CURLOPT_POST,1L);
-        curl_easy_setopt(curl,CURLOPT_POSTFIELDS,contents);
+#endif
 
         curl_res = curl_easy_perform(curl);
         if (curl_res != CURLE_OK) {
@@ -278,7 +265,7 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
 cleanup_curl:
         curl_easy_cleanup(curl);
 free_contents:
-        free(contents);
+        free(contents); /* might already be NULL for delete, but that's OK */
 free_url:
         free(url);
 done:
@@ -308,3 +295,57 @@ etcd_set (etcd_session this_as_void, char *key, char *value,
 
         return ETCD_WTF;
 }
+
+
+/*
+ * This uses the same path and status checks as SET, but with a different HTTP
+ * command instead of data.  Precondition and TTL are obviously not used in
+ * this case, though a conditional delete would be a cool feature for etcd.  I
+ * think you can get a timed delete by doing a conditional set to the current
+ * value with a TTL, but I haven't actually tried it.
+ */
+etcd_result
+etcd_delete (etcd_session this_as_void, char *key)
+{
+        _etcd_session   *this   = this_as_void;
+        etcd_server     *srv;
+        etcd_result     res;
+
+        for (srv = this->servers; srv->host; ++srv) {
+                res = etcd_put_one(this,key,NULL,NULL,0,srv);
+                if (res == ETCD_OK) {
+                        break;
+                }
+        }
+
+        return res;
+}
+
+
+size_t
+store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
+{
+        *((char **)stream) = strdup(ptr);
+        return size * nmemb;
+}
+
+
+char *
+etcd_leader (etcd_session this_as_void)
+{
+        _etcd_session   *this   = this_as_void;
+        etcd_server     *srv;
+        char            *res;
+
+        for (srv = this->servers; srv->host; ++srv) {
+                res = etcd_get_one(this,"leader",srv,"",store_leader);
+                if (res) {
+                        return res;
+                }
+        }
+
+        return NULL;
+}
+
+
+

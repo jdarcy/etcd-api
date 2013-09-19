@@ -1,14 +1,4 @@
 /*
- * TBD
- *
- *      etcd_watch: watch a prefix, invoking a callback when there are changes
- *      (blocks so run from its own thread)
- *
- *      etcd_elect: run a leader-election protocol using the get/set
- *      primitives, and report the result
- */
-
-/*
  * Description of an etcd server.  For now it just includes the name and
  * port, but some day it might include other stuff like SSL certificate
  * information.
@@ -88,6 +78,17 @@ etcd_result     etcd_set        (etcd_session this, char *key, char *value,
                                  char *precond, unsigned int ttl);
 
 
+/*
+ * etcd_delete
+ *
+ * Delete a key from one of the servers in a session.
+ *
+ *      key
+ *      The etcd key (path) to delete.
+ */
+
+etcd_result     etcd_delete     (etcd_session this, char *key);
+
 
 /*
  * etcd_leader
@@ -95,5 +96,4 @@ etcd_result     etcd_set        (etcd_session this, char *key, char *value,
  * Get the identify of the current leader.
  */
 
-char *
-etcd_leader (etcd_session this_as_void);
+char *          etcd_leader     (etcd_session this_as_void);
