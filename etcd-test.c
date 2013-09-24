@@ -51,6 +51,46 @@ do_get (etcd_session sess, char *key)
 
 
 int
+do_watch (etcd_session sess, char *pfx, char *index_str)
+{
+        char            *key;
+        char            *value;       
+        int             index_i;
+        int             *indexp;
+        etcd_result     res;
+
+        printf("getting %s\n",pfx);
+
+        if (index_str) {
+                index_i = (int)strtol(index_str,NULL,10);
+                indexp = &index_i;
+        }
+        else {
+                indexp = NULL;
+        }
+
+        for (;;) {
+                res = etcd_watch(sess,pfx,&key,&value,indexp,&index_i);
+                if (res != ETCD_OK) {
+                        fprintf(stderr,"etcd_watch failed\n");
+                        return !0;
+                }
+                if (value) {
+                        printf("key %s was set to %s\n",key,value);
+                        free(value);
+                }
+                else {
+                        printf("key %s was deleted\n",key);
+                }
+                free(key);
+                printf("index is %d\n",index_i++);
+                indexp = &index_i;
+        }
+        return 0;
+}
+
+
+int
 do_set (etcd_session sess, char *key, char *value, char *precond, char *ttl)
 {
         unsigned long           ttl_num = 0;
@@ -117,9 +157,11 @@ do_leader (etcd_session sess)
 
 struct option my_opts[] = {
         { "delete",     no_argument,            NULL,   'd' },
+        { "index",      required_argument,      NULL,   'w' },
         { "precond",    required_argument,      NULL,   'p' },
         { "servers",    required_argument,      NULL,   's' },
         { "ttl",        required_argument,      NULL,   't' },
+        { "watch",      no_argument,            NULL,   'w' },
         { NULL }
 };
 
@@ -130,6 +172,7 @@ print_usage (char *prog)
         fprintf (stderr, "  for get:    key\n");
         fprintf (stderr, "  for set:    [-p precond] [-t ttl] key value\n");
         fprintf (stderr, "  for delete: -d key\n");
+        fprintf (stderr, "  for watch:  -w [-i index] key\n");
         fprintf (stderr, "  for leader: (no cmd-args)\n");
         fprintf (stderr, "Server list is host:port pairs separated by comma,\n"
                          "semicolon, or white space.  If not given on the\n"
@@ -143,21 +186,26 @@ int
 main (int argc, char **argv)
 {
         int             opt;
-        int             delete          = 0;
-        char            *precond        = NULL;
         char            *servers        = getenv("ETCD_SERVERS");
+        int             delete          = 0;
+        int             watch           = 0;
+        char            *precond        = NULL;
         char            *ttl            = NULL;
+        char            *index_str      = NULL;
         etcd_session    sess;
         int             res;
 
         for (;;) {
-                opt = getopt_long(argc,argv,"dp:s:t:",my_opts,NULL);
+                opt = getopt_long(argc,argv,"di:p:s:t:w",my_opts,NULL);
                 if (opt == (-1)) {
                         break;
                 }
                 switch (opt) {
                 case 'd':
                         delete = 1;
+                        break;
+                case 'i':
+                        index_str = optarg;
                         break;
                 case 'p':
                         precond = optarg;
@@ -168,6 +216,9 @@ main (int argc, char **argv)
                 case 't':
                         ttl = optarg;
                         break;
+                case 'w':
+                        watch = 1;
+                        break;
                 default:
                         return print_usage(argv[0]);
                 }
@@ -176,7 +227,10 @@ main (int argc, char **argv)
         if (!servers) {
                 return print_usage(argv[0]);
         }
-        if (delete && ((argc - optind) != 1)) {
+        if ((delete || watch) && ((argc - optind) != 1)) {
+                return print_usage(argv[0]);
+        }
+        if ((watch && delete) || (!watch && index_str)) {
                 return print_usage(argv[0]);
         }
         if ((precond || ttl) && ((argc - optind) != 2)) {
@@ -196,6 +250,9 @@ main (int argc, char **argv)
         case 1:
                 if (delete) {
                         res = do_delete(sess,argv[optind]);
+                }
+                else if (watch) {
+                        res = do_watch(sess,argv[optind],index_str);
                 }
                 else {
                         res = do_get(sess,argv[optind]);

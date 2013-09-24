@@ -40,6 +40,13 @@ typedef struct {
         etcd_server     *servers;
 } _etcd_session;
 
+typedef struct {
+        char            *key;
+        char            *value;
+        int             *index_in;      /* pointer so NULL can be special */
+        int             index_out;      /* NULL would be meaningless */
+} etcd_watch_t;
+
 typedef size_t curl_callback_t (void *, size_t, size_t, void *);
 
 int g_inited = 0;
@@ -116,14 +123,14 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 }
 
 
-char *
-etcd_get_one (_etcd_session *this, char *key, etcd_server *srv,
-              char *prefix, curl_callback_t cb)
+etcd_result
+etcd_get_one (_etcd_session *this, char *key, etcd_server *srv, char *prefix,
+              char *post, curl_callback_t cb, char **stream)
 {
         char            *url;
         CURL            *curl;
         CURLcode        curl_res;
-        char            *res            = NULL;
+        etcd_result     res             = ETCD_WTF;
         ssize_t         n_read          = -1;
         void            *err_label      = &&done;
 
@@ -143,7 +150,11 @@ etcd_get_one (_etcd_session *this, char *key, etcd_server *srv,
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,cb);
-        curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+        curl_easy_setopt(curl,CURLOPT_WRITEDATA,stream);
+        if (post) {
+                curl_easy_setopt(curl,CURLOPT_POST,1L);
+                curl_easy_setopt(curl,CURLOPT_POSTFIELDS,post);
+        }
 #if defined(DEBUG)
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
 #endif
@@ -154,10 +165,7 @@ etcd_get_one (_etcd_session *this, char *key, etcd_server *srv,
                 goto *err_label;
         }
 
-        /*
-         * If the request succeeded, parse_get_response should have set res for
-         * us.
-         */
+        res = ETCD_OK;
 
 cleanup_curl:
         curl_easy_cleanup(curl);
@@ -173,16 +181,99 @@ etcd_get (etcd_session this_as_void, char *key)
 {
         _etcd_session   *this   = this_as_void;
         etcd_server     *srv;
-        char            *res;
+        etcd_result     res;
+        char            *value  = NULL;
 
         for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_get_one(this,key,srv,"keys/",parse_get_response);
-                if (res) {
-                        return res;
+                res = etcd_get_one(this,key,srv,"keys/",NULL,
+                                   parse_get_response,&value);
+                if ((res == ETCD_OK) && value) {
+                        return value;
                 }
         }
 
         return NULL;
+}
+
+
+size_t
+parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
+{
+        yajl_val                node;
+        yajl_val                value;
+        etcd_watch_t            *watch  = stream;
+        static const char       *i_path[] = { "index", NULL };
+        static const char       *k_path[] = { "key", NULL };
+        static const char       *v_path[] = { "value", NULL };
+
+        node = yajl_tree_parse(ptr,NULL,0);
+        if (node) {
+                value = yajl_tree_get(node,i_path,yajl_t_number);
+                if (value) {
+                        watch->index_out = strtoul(YAJL_GET_NUMBER(value),
+                                                   NULL,10);
+                }
+                value = yajl_tree_get(node,k_path,yajl_t_string);
+                if (value) {
+                        watch->key = strdup(YAJL_GET_STRING(value));
+                }
+                value = yajl_tree_get(node,v_path,yajl_t_string);
+                if (value) {
+                        watch->value = strdup(YAJL_GET_STRING(value));
+                }
+                else {
+                        /* Must have been a DELETE. */
+                        watch->value = NULL;
+                }
+        }
+
+        return size*nmemb;
+}
+
+
+etcd_result
+etcd_watch (etcd_session this_as_void, char *pfx,
+            char **keyp, char **valuep, int *index_in, int *index_out)
+{
+        _etcd_session   *this   = this_as_void;
+        etcd_server     *srv;
+        etcd_result     res;
+        etcd_watch_t    watch;
+        char            *post;
+
+        if (index_in) {
+                if (asprintf(&post,"index=%d",*index_in) < 0) {
+                        return ETCD_WTF;
+                }
+        }
+        else {
+                post = NULL;
+        }
+
+        memset(&watch.key,0,sizeof(watch));
+        watch.index_in = index_in;
+
+        for (srv = this->servers; srv->host; ++srv) {
+                res = etcd_get_one(this,pfx,srv,"watch/",post,
+                                   parse_watch_response,(char **)&watch);
+                if ((res == ETCD_OK) && watch.key) {
+                        if (keyp) {
+                                *keyp = watch.key;
+                        }
+                        if (valuep) {
+                                *valuep = watch.value;
+                        }
+                        if (index_out) {
+                                *index_out = watch.index_out;
+                        }
+                        break;
+                }
+        }
+
+        if (post) {
+                free(post);
+        }
+        return res;
 }
 
 
@@ -367,12 +458,14 @@ etcd_leader (etcd_session this_as_void)
 {
         _etcd_session   *this   = this_as_void;
         etcd_server     *srv;
-        char            *res;
+        etcd_result     res;
+        char            *value  = NULL;
 
         for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_get_one(this,"leader",srv,"",store_leader);
-                if (res) {
-                        return res;
+                res = etcd_get_one(this,"leader",srv,"",NULL,
+                                   store_leader,&value);
+                if ((res == ETCD_OK) && value) {
+                        return value;
                 }
         }
 

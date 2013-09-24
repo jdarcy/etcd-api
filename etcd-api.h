@@ -98,6 +98,39 @@ char *          etcd_get (etcd_session this, char *key);
 
 
 /*
+ * etcd_watch
+ * Watch the set of keys matching a prefix.
+ *
+ *      pfx
+ *      The etcd key prefix (like a path) to watch.
+ *
+ *      keyp
+ *      Space for a pointer to the key that was added/modified/deleted.
+ *
+ *      valuep
+ *      Space for a pointer to the value if a key was added/modified.  A delete
+ *      is signified by this being set to NULL.
+ *
+ *      index_in
+ *      Pointer to an index to be used for *issuing* the watch request, or
+ *      NULL for a watch without an index.
+ *
+ *      index_out
+ *      Pointer to space for an index *returned* by etcd, or NULL to mean don't
+ *      bother.
+ *
+ * In normal usage, index_in will be NULL and index_out will be set to receive
+ * the index for the first watch.  Subsequently, index_in will be set to
+ * provide the previous index (plus one) and index_out will be set to receive
+ * the next.  It's entirely legitimate to point both at the same variable.
+ */
+
+etcd_result     etcd_watch (etcd_session this, char *pfx,
+                            char **keyp, char **valuep,
+                            int *index_in, int *index_out);
+
+
+/*
  * etcd_set
  *
  * Write a key, with optional TTL and/or previous value (as a precondition).
@@ -141,23 +174,3 @@ etcd_result     etcd_delete     (etcd_session this, char *key);
  */
 
 char *          etcd_leader     (etcd_session this_as_void);
-
-
-/*
- * TBD: add etcd_watch
- *
- * This is mostly like GET, but with two extra sources of complexity.  The
- * first is that we need to parse/return a key and *maybe* a value.  We can
- * probably signal a DELETE (instead of SET) with a NULL value, but it's still
- * two extra parameters.  The other source of complexity is the "index"
- * parameter, which needs to be passed both in and out.  Normally that would
- * mean one parameter passed by reference, but there's no obvious sentinel
- * value on input, so we need at least one more bit to indicate that no index
- * should be passed to the server.  On the other end, we need at least one bit
- * to indicate that no index should be passed *back* to the caller.  So yes,
- * we can pass by reference, but then we also need a fourth extra flag
- * parameter with ETCD_INDEX_IN and ETCD_INDEX_OUT flags to narrow things down.
- *
- * For now, people can just poll.  If you really want etcd_watch implemented,
- * let me know - or earn my undying gratitude if you add it yourself.  ;)
- */
