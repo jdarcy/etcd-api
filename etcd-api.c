@@ -32,6 +32,10 @@
 #include "etcd-api.h"
 
 
+#define DEFAULT_ETCD_PORT       4001
+#define SL_DELIM                "\n\r\t ,;"
+
+
 typedef struct {
         etcd_server     *servers;
 } _etcd_session;
@@ -67,8 +71,10 @@ etcd_open (etcd_server *server_list)
         }
 
         /*
-         * Some day we'll set up more persistent connections, but for now
-         * that work is pushed to other methods.
+         * Some day we'll set up more persistent connections, and keep track
+         * (via redirects) of which server is leader so that we can always
+         * try it first.  For now we just push that to the individual request
+         * functions, which do the most brain-dead thing that can work.
          */
 
         this->servers = server_list;
@@ -374,4 +380,109 @@ etcd_leader (etcd_session this_as_void)
 }
 
 
+void
+free_sl (etcd_server *server_list)
+{
+        size_t          num_servers;
 
+        for (num_servers = 0; server_list[num_servers].host; ++num_servers) {
+                free(server_list[num_servers].host);
+        }
+        free(server_list);
+}
+
+
+int
+_count_matching (char *text, char *cset, int result)
+{
+        char    *t;
+        int     res     = 0;
+
+        for (t = text; *t; ++t) {
+                if ((strchr(cset,*t) != NULL) != result) {
+                        break;
+                }
+                ++res;
+        }
+
+        return res;
+}
+
+#define count_matching(t,cs)    _count_matching(t,cs,1)
+#define count_nonmatching(t,cs) _count_matching(t,cs,0)
+
+
+etcd_session
+etcd_open_str (char *server_names)
+{
+        char            *snp;
+        int             run_len;
+        int             host_len;
+        size_t           num_servers;
+        etcd_server     *server_list;
+        etcd_session    *session;
+
+        /*
+         * Yeah, we iterate over the string twice so we can allocate an
+         * appropriately sized array instead of turning it into a linked list.
+         * Unfortunately this means we can't use strtok* which is destructive
+         * with no platform-independent way to reverse the destructive effects.
+         */
+
+        num_servers = 0;
+        snp = server_names;
+        while (*snp) {
+                run_len = count_nonmatching(snp,SL_DELIM);
+                if (!run_len) {
+                        snp += count_matching(snp,SL_DELIM);
+                        continue;
+                }
+                ++num_servers;
+                snp += run_len;
+        }
+
+        if (!num_servers) {
+                return NULL;
+        }
+
+        server_list = calloc(num_servers+1,sizeof(*server_list));
+        if (!server_list) {
+                return NULL;
+        }
+        num_servers = 0;
+
+        snp = server_names;
+        while (*snp) {
+                run_len = count_nonmatching(snp,SL_DELIM);
+                if (!run_len) {
+                        snp += count_matching(snp,SL_DELIM);
+                        continue;
+                }
+                host_len = count_nonmatching(snp,":");
+                if ((run_len - host_len) > 1) {
+                        server_list[num_servers].host = strndup(snp,host_len);
+                        server_list[num_servers].port = (unsigned short)
+                                strtoul(snp+host_len+1,NULL,10);
+                }
+                else {
+                        server_list[num_servers].host = strndup(snp,run_len);
+                        server_list[num_servers].port = DEFAULT_ETCD_PORT;
+                }
+                ++num_servers;
+                snp += run_len;
+        }
+
+        session = etcd_open(server_list);
+        if (!session) {
+                free_sl(server_list);
+        }
+        return session;
+}
+
+
+void
+etcd_close_str (etcd_session this)
+{
+        free_sl(((_etcd_session *)this)->servers);
+        etcd_close(this);
+}

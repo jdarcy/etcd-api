@@ -30,13 +30,6 @@
 #include <string.h>
 #include "etcd-api.h"
 
-etcd_server my_servers[] = {
-        { "gfs1",  4001 },
-        { "gfs1",  4002 },
-        { "gfs1",  4003 },
-        { NULL }
-};
-
 
 int
 do_get (etcd_session sess, char *key)
@@ -125,6 +118,7 @@ do_leader (etcd_session sess)
 struct option my_opts[] = {
         { "delete",     no_argument,            NULL,   'd' },
         { "precond",    required_argument,      NULL,   'p' },
+        { "servers",    required_argument,      NULL,   's' },
         { "ttl",        required_argument,      NULL,   't' },
         { NULL }
 };
@@ -132,11 +126,16 @@ struct option my_opts[] = {
 int
 print_usage (char *prog)
 {
-        fprintf (stderr, "get:    %s key\n", prog);
-        fprintf (stderr, "set:    %s [-p precond] [-t ttl] key value\n",
-                 prog);
-        fprintf (stderr, "delete: %s -d key\n", prog);
-        fprintf (stderr, "leader: %s\n", prog);
+        fprintf (stderr, "Usage: %s [-s server-list] ...\n",prog);
+        fprintf (stderr, "  for get:    key\n");
+        fprintf (stderr, "  for set:    [-p precond] [-t ttl] key value\n");
+        fprintf (stderr, "  for delete: -d key\n");
+        fprintf (stderr, "  for leader: (no cmd-args)\n");
+        fprintf (stderr, "Server list is host:port pairs separated by comma,\n"
+                         "semicolon, or white space.  If not given on the\n"
+                         "command line, ETCD_SERVERS will be used from the\n"
+                         "environment instead.\n");
+
         return !0;
 }
 
@@ -146,11 +145,13 @@ main (int argc, char **argv)
         int             opt;
         int             delete          = 0;
         char            *precond        = NULL;
+        char            *servers        = getenv("ETCD_SERVERS");
         char            *ttl            = NULL;
         etcd_session    sess;
+        int             res;
 
         for (;;) {
-                opt = getopt_long(argc,argv,"dp:t:",my_opts,NULL);
+                opt = getopt_long(argc,argv,"dp:s:t:",my_opts,NULL);
                 if (opt == (-1)) {
                         break;
                 }
@@ -161,6 +162,9 @@ main (int argc, char **argv)
                 case 'p':
                         precond = optarg;
                         break;
+                case 's':
+                        servers = optarg;
+                        break;
                 case 't':
                         ttl = optarg;
                         break;
@@ -169,6 +173,9 @@ main (int argc, char **argv)
                 }
         }
 
+        if (!servers) {
+                return print_usage(argv[0]);
+        }
         if (delete && ((argc - optind) != 1)) {
                 return print_usage(argv[0]);
         }
@@ -176,7 +183,7 @@ main (int argc, char **argv)
                 return print_usage(argv[0]);
         }
 
-        sess = etcd_open(my_servers);
+        sess = etcd_open_str(strdup(servers));
         if (!sess) {
                 fprintf(stderr,"etcd_open failed\n");
                 return !0;
@@ -184,20 +191,23 @@ main (int argc, char **argv)
 
         switch (argc - optind) {
         case 0:
-                return do_leader(sess);
+                res = do_leader(sess);
+                break;
         case 1:
                 if (delete) {
-                        return do_delete(sess,argv[optind]);
+                        res = do_delete(sess,argv[optind]);
                 }
                 else {
-                        return do_get(sess,argv[optind]);
+                        res = do_get(sess,argv[optind]);
                 }
+                break;
         case 2:
-                return do_set(sess,argv[optind],argv[optind+1],precond,ttl);
+                res = do_set(sess,argv[optind],argv[optind+1],precond,ttl);
+                break;
         default:
-                /* Shut up, gcc.  The real fall-through is at the end. */
-                ;
+                return print_usage(argv[0]);
         }
 
-        return print_usage(argv[0]);
+        etcd_close_str(sess);
+        return res;
 }

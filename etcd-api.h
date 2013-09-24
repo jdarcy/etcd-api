@@ -59,12 +59,30 @@ etcd_session    etcd_open       (etcd_server *server_list);
 
 
 /*
+ * etcd_open_str
+ *
+ * Same as etcd_open, except that the servers are specified as a list of
+ * host:port strings, separated by comma/semicolon or whitespace.
+ */
+etcd_session    etcd_open_str   (char *server_names);
+
+
+/*
  * etcd_close
  *
  * Terminate a session, closing connections and freeing memory (or any other
  * resources) associated with it.
  */
 void            etcd_close      (etcd_session this);
+
+
+/*
+ * etcd_close
+ *
+ * Same as etcd_close, but also free the server list as etcd_open_str would
+ * have allocated it.
+ */
+void            etcd_close_str  (etcd_session this_as_void);
 
 
 /*
