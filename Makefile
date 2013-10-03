@@ -22,15 +22,30 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-OBJECTS	= etcd-api.o etcd-test.o
-TARGET	= etcd-test
 CFLAGS	= -DDEBUG -g -O0
+COMMON	= etcd-api.o
 
-TARGET: $(OBJECTS)
-	$(CC) $(OBJECTS) -lcurl -lyajl -o $(TARGET)
+TESTER	= etcd-test
+T_OBJS	= etcd-test.o
+T_ALL	= $(T_OBJS) $(COMMON)
+
+LEADER	= leader
+L_OBJS	= leader.o
+L_ALL	= $(L_OBJS) $(COMMON)
+
+TARGETS	= $(TESTER) $(LEADER)
+OBJECTS	= $(COMMON) $(T_OBJS) $(L_OBJS)
+
+all: $(TARGETS)
+
+$(TESTER): $(T_ALL)
+	$(CC) $(T_ALL) -lcurl -lyajl -o $@
+
+$(LEADER): $(L_ALL)
+	$(CC) $(L_ALL) -lcurl -lyajl -o $@
 
 clean:
 	rm -f $(OBJECTS)
 
 clobber distclean realclean spotless: clean
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
