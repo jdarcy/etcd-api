@@ -22,27 +22,30 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-CFLAGS	= -DDEBUG -g -O0
-COMMON	= etcd-api.o
+CFLAGS	= -fPIC -DDEBUG -g -O0
+
+SHLIB	= libetcd.so
+S_OBJS	= etcd-api.o
 
 TESTER	= etcd-test
 T_OBJS	= etcd-test.o
-T_ALL	= $(T_OBJS) $(COMMON)
 
 LEADER	= leader
 L_OBJS	= leader.o
-L_ALL	= $(L_OBJS) $(COMMON)
 
-TARGETS	= $(TESTER) $(LEADER)
-OBJECTS	= $(COMMON) $(T_OBJS) $(L_OBJS)
+TARGETS	= $(SHLIB) $(TESTER) $(LEADER)
+OBJECTS	= $(S_OBJS) $(T_OBJS) $(L_OBJS)
 
 all: $(TARGETS)
 
-$(TESTER): $(T_ALL)
-	$(CC) $(T_ALL) -lcurl -lyajl -o $@
+$(SHLIB): $(S_OBJS)
+	$(CC) -shared -nostartfiles $(S_OBJS) -lcurl -lyajl -o $@
 
-$(LEADER): $(L_ALL)
-	$(CC) $(L_ALL) -lcurl -lyajl -o $@
+$(TESTER): $(T_OBJS) $(SHLIB)
+	$(CC) $(T_OBJS) -L. -letcd -o $@
+
+$(LEADER): $(L_OBJS) $(SHLIB)
+	$(CC) $(L_OBJS) -L. -letcd -o $@
 
 clean:
 	rm -f $(OBJECTS)
