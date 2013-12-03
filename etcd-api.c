@@ -49,7 +49,8 @@ typedef struct {
 
 typedef size_t curl_callback_t (void *, size_t, size_t, void *);
 
-int g_inited = 0;
+int             g_inited        = 0;
+const char      *value_path[]   = { "value", NULL };
 
 #if defined(DEBUG)
 void
@@ -95,17 +96,58 @@ etcd_close (etcd_session this)
         free(this);
 }
 
+/*
+ * Looking directly at node->u.array seems terribly un-modular, but the YAJL
+ * tree interface doesn't seem to have any exposed API for iterating over the
+ * elements of an array.  I tried using yajl_tree_get with an index in the
+ * path, either as a type-casted integer or as a string, but that didn't work.
+ */
+char *
+parse_array_response (yajl_val node)
+{
+        size_t          i;
+        yajl_val        item;
+        yajl_val        value;
+        char            *retval = NULL;
+        char            *saved;
+
+        for (i = 0; i < node->u.array.len; ++i) {
+                item = node->u.array.values[i];
+                if (!item) {
+                        break;
+                }
+                value = yajl_tree_get(item,value_path,yajl_t_string);
+                if (!value) {
+                        break;
+                }
+                if (retval) {
+                        saved = retval;
+                        retval = NULL;
+                        (void)asprintf (&retval, "%s\n%s",
+                                        saved, YAJL_GET_STRING(value));
+                        free(saved);
+                }
+                else {
+                        retval = strdup(YAJL_GET_STRING(value));
+                }
+                if (!retval) {
+                        break;
+                }
+        }
+
+        return retval;
+}
 
 size_t
 parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
         yajl_val        node;
         yajl_val        value;
-        static const char       *path[] = { "value", NULL };
 
         node = yajl_tree_parse(ptr,NULL,0);
-        if (node) {
-                value = yajl_tree_get(node,path,yajl_t_string);
+        if (node) switch (node->type) {
+        case yajl_t_object:
+                value = yajl_tree_get(node,value_path,yajl_t_string);
                 if (value) {
                         /* 
                          * YAJL probably copied it once, now we're going to
@@ -117,8 +159,15 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
                          */
                         *((char **)stream) = strdup(YAJL_GET_STRING(value));
                 }
+                break;
+        case yajl_t_array:
+                *((char **)stream) = parse_array_response(node);
+                break;
+        default:
+                ;
         }
 
+        yajl_tree_free(node);
         return size*nmemb;
 }
 
