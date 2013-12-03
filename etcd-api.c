@@ -356,6 +356,7 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
         /* TBD: add error checking for these */
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
+        curl_easy_setopt(curl,CURLOPT_POSTREDIR,CURL_REDIR_POST_ALL);
         curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_set_response);
         curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
         if (value) {
