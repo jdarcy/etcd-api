@@ -24,6 +24,11 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/* For asprintf */
+#if !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +39,6 @@
 
 #define DEFAULT_ETCD_PORT       4001
 #define SL_DELIM                "\n\r\t ,;"
-
 
 typedef struct {
         etcd_server     *servers;
@@ -50,7 +54,19 @@ typedef struct {
 typedef size_t curl_callback_t (void *, size_t, size_t, void *);
 
 int             g_inited        = 0;
-const char      *value_path[]   = { "value", NULL };
+const char      *value_path[]   = { "node", "value", NULL };
+
+/*
+ * We only call this in case where it should be safe, but gcc doesn't know
+ * that so we use this to shut it up.
+ */
+char *
+MY_YAJL_GET_STRING (yajl_val x)
+{
+        char *y = YAJL_GET_STRING(x);
+
+        return y ? y : "bogus";
+}
 
 #if defined(DEBUG)
 void
@@ -124,11 +140,11 @@ parse_array_response (yajl_val node)
                         saved = retval;
                         retval = NULL;
                         (void)asprintf (&retval, "%s\n%s",
-                                        saved, YAJL_GET_STRING(value));
+                                        saved, MY_YAJL_GET_STRING(value));
                         free(saved);
                 }
                 else {
-                        retval = strdup(YAJL_GET_STRING(value));
+                        retval = strdup(MY_YAJL_GET_STRING(value));
                 }
                 if (!retval) {
                         break;
@@ -157,7 +173,7 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
                          * stream interface) to avoid the copy.  Right now it's
                          * just not worth it.
                          */
-                        *((char **)stream) = strdup(YAJL_GET_STRING(value));
+                        *((char **)stream) = strdup(MY_YAJL_GET_STRING(value));
                 }
                 break;
         case yajl_t_array:
@@ -180,10 +196,9 @@ etcd_get_one (_etcd_session *this, char *key, etcd_server *srv, char *prefix,
         CURL            *curl;
         CURLcode        curl_res;
         etcd_result     res             = ETCD_WTF;
-        ssize_t         n_read          = -1;
         void            *err_label      = &&done;
 
-        if (asprintf(&url,"http://%s:%u/v1/%s%s",
+        if (asprintf(&url,"http://%s:%u/v2/%s%s",
                      srv->host,srv->port,prefix,key) < 0) {
                 goto *err_label;
         }
@@ -264,11 +279,11 @@ parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
                 }
                 value = yajl_tree_get(node,k_path,yajl_t_string);
                 if (value) {
-                        watch->key = strdup(YAJL_GET_STRING(value));
+                        watch->key = strdup(MY_YAJL_GET_STRING(value));
                 }
                 value = yajl_tree_get(node,v_path,yajl_t_string);
                 if (value) {
-                        watch->value = strdup(YAJL_GET_STRING(value));
+                        watch->value = strdup(MY_YAJL_GET_STRING(value));
                 }
                 else {
                         /* Must have been a DELETE. */
@@ -337,7 +352,7 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
          * contain errorCode and cause.  Among all these, index seems to be the
          * one we're most likely to need later, so look for that.
          */
-        static const char       *path[] = { "index", NULL };
+        static const char       *path[] = { "node", "modifiedIndex", NULL };
 
         node = yajl_tree_parse(ptr,NULL,0);
         if (node) {
@@ -364,7 +379,7 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
         CURLcode                curl_res;
         void                    *err_label      = &&done;
 
-        if (asprintf(&url,"http://%s:%u/v1/keys/%s",
+        if (asprintf(&url,"http://%s:%u/v2/keys/%s",
                      srv->host,srv->port,key) < 0) {
                 goto *err_label;
         }
@@ -403,6 +418,7 @@ etcd_put_one (_etcd_session *this, char *key, char *value,
         err_label = &&cleanup_curl;
 
         /* TBD: add error checking for these */
+        curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,"PUT");
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_POSTREDIR,CURL_REDIR_POST_ALL);
