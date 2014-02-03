@@ -82,15 +82,15 @@ print_curl_error (char *intro, CURLcode res)
 etcd_session
 etcd_open (etcd_server *server_list)
 {
-        _etcd_session   *this;
+        _etcd_session   *session;
 
         if (!g_inited) {
                 curl_global_init(CURL_GLOBAL_ALL);
                 g_inited = 1;
         }
 
-        this = malloc(sizeof(*this));
-        if (!this) {
+        session = malloc(sizeof(*session));
+        if (!session) {
                 return NULL;
         }
 
@@ -101,15 +101,15 @@ etcd_open (etcd_server *server_list)
          * functions, which do the most brain-dead thing that can work.
          */
 
-        this->servers = server_list;
-        return this;
+        session->servers = server_list;
+        return session;
 }
 
 
 void
-etcd_close (etcd_session this)
+etcd_close (etcd_session session)
 {
-        free(this);
+        free(session);
 }
 
 /*
@@ -189,7 +189,7 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 etcd_result
-etcd_get_one (_etcd_session *this, char *key, etcd_server *srv, char *prefix,
+etcd_get_one (_etcd_session *session, char *key, etcd_server *srv, char *prefix,
               char *post, curl_callback_t cb, char **stream)
 {
         char            *url;
@@ -241,15 +241,15 @@ done:
 
 
 char *
-etcd_get (etcd_session this_as_void, char *key)
+etcd_get (etcd_session session_as_void, char *key)
 {
-        _etcd_session   *this   = this_as_void;
+        _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
         etcd_result     res;
         char            *value  = NULL;
 
-        for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_get_one(this,key,srv,"keys/",NULL,
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_get_one(session,key,srv,"keys/",NULL,
                                    parse_get_response,&value);
                 if ((res == ETCD_OK) && value) {
                         return value;
@@ -296,10 +296,10 @@ parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 etcd_result
-etcd_watch (etcd_session this_as_void, char *pfx,
+etcd_watch (etcd_session session_as_void, char *pfx,
             char **keyp, char **valuep, int *index_in, int *index_out)
 {
-        _etcd_session   *this   = this_as_void;
+        _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
         etcd_result     res;
         etcd_watch_t    watch;
@@ -317,8 +317,8 @@ etcd_watch (etcd_session this_as_void, char *pfx,
         memset(&watch.key,0,sizeof(watch));
         watch.index_in = index_in;
 
-        for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_get_one(this,pfx,srv,"watch/",post,
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_get_one(session,pfx,srv,"watch/",post,
                                    parse_watch_response,(char **)&watch);
                 if ((res == ETCD_OK) && watch.key) {
                         if (keyp) {
@@ -369,7 +369,7 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 /* NB: a null value means to use HTTP DELETE and ignore precond/ttl */
 etcd_result
-etcd_put_one (_etcd_session *this, char *key, char *value,
+etcd_put_one (_etcd_session *session, char *key, char *value,
               char *precond, unsigned int ttl, etcd_server *srv)
 {
         char                    *url;
@@ -463,15 +463,15 @@ done:
 
 
 etcd_result
-etcd_set (etcd_session this_as_void, char *key, char *value,
+etcd_set (etcd_session session_as_void, char *key, char *value,
           char *precond, unsigned int ttl)
 {
-        _etcd_session   *this   = this_as_void;
+        _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
         etcd_result     res;
 
-        for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_put_one(this,key,value,precond,ttl,srv);
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_put_one(session,key,value,precond,ttl,srv);
                 /*
                  * Protocol errors are likely to be things like precondition
                  * failures, which won't be helped by retrying on another
@@ -494,14 +494,14 @@ etcd_set (etcd_session this_as_void, char *key, char *value,
  * value with a TTL, but I haven't actually tried it.
  */
 etcd_result
-etcd_delete (etcd_session this_as_void, char *key)
+etcd_delete (etcd_session session_as_void, char *key)
 {
-        _etcd_session   *this   = this_as_void;
+        _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
         etcd_result     res;
 
-        for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_put_one(this,key,NULL,NULL,0,srv);
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_put_one(session,key,NULL,NULL,0,srv);
                 if (res == ETCD_OK) {
                         break;
                 }
@@ -520,15 +520,15 @@ store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 char *
-etcd_leader (etcd_session this_as_void)
+etcd_leader (etcd_session session_as_void)
 {
-        _etcd_session   *this   = this_as_void;
+        _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
         etcd_result     res;
         char            *value  = NULL;
 
-        for (srv = this->servers; srv->host; ++srv) {
-                res = etcd_get_one(this,"leader",srv,"",NULL,
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_get_one(session,"leader",srv,"",NULL,
                                    store_leader,&value);
                 if ((res == ETCD_OK) && value) {
                         return value;
@@ -640,8 +640,8 @@ etcd_open_str (char *server_names)
 
 
 void
-etcd_close_str (etcd_session this)
+etcd_close_str (etcd_session session)
 {
-        free_sl(((_etcd_session *)this)->servers);
-        etcd_close(this);
+        free_sl(((_etcd_session *)session)->servers);
+        etcd_close(session);
 }

@@ -73,7 +73,7 @@ etcd_session    etcd_open_str   (char *server_names);
  * Terminate a session, closing connections and freeing memory (or any other
  * resources) associated with it.
  */
-void            etcd_close      (etcd_session this);
+void            etcd_close      (etcd_session session);
 
 
 /*
@@ -82,7 +82,7 @@ void            etcd_close      (etcd_session this);
  * Same as etcd_close, but also free the server list as etcd_open_str would
  * have allocated it.
  */
-void            etcd_close_str  (etcd_session this_as_void);
+void            etcd_close_str  (etcd_session session);
 
 
 /*
@@ -94,7 +94,7 @@ void            etcd_close_str  (etcd_session this_as_void);
  *      key
  *      The etcd key (path) to fetch.
  */
-char *          etcd_get (etcd_session this, char *key);
+char *          etcd_get (etcd_session session, char *key);
 
 
 /*
@@ -125,7 +125,7 @@ char *          etcd_get (etcd_session this, char *key);
  * the next.  It's entirely legitimate to point both at the same variable.
  */
 
-etcd_result     etcd_watch (etcd_session this, char *pfx,
+etcd_result     etcd_watch (etcd_session session, char *pfx,
                             char **keyp, char **valuep,
                             int *index_in, int *index_out);
 
@@ -151,7 +151,7 @@ etcd_result     etcd_watch (etcd_session this, char *pfx,
  *      deleted, or zero to mean no auto-expiration.
  */
 
-etcd_result     etcd_set        (etcd_session this, char *key, char *value,
+etcd_result     etcd_set        (etcd_session session, char *key, char *value,
                                  char *precond, unsigned int ttl);
 
 
@@ -164,7 +164,7 @@ etcd_result     etcd_set        (etcd_session this, char *key, char *value,
  *      The etcd key (path) to delete.
  */
 
-etcd_result     etcd_delete     (etcd_session this, char *key);
+etcd_result     etcd_delete     (etcd_session session, char *key);
 
 
 /*
@@ -173,4 +173,4 @@ etcd_result     etcd_delete     (etcd_session this, char *key);
  * Get the identify of the current leader.
  */
 
-char *          etcd_leader     (etcd_session this_as_void);
+char *          etcd_leader     (etcd_session session);
