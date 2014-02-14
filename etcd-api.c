@@ -189,8 +189,8 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 etcd_result
-etcd_get_one (_etcd_session *session, char *key, etcd_server *srv, char *prefix,
-              char *post, curl_callback_t cb, char **stream)
+etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const char *prefix,
+              const char *post, curl_callback_t cb, char **stream)
 {
         char            *url;
         CURL            *curl;
@@ -241,7 +241,7 @@ done:
 
 
 char *
-etcd_get (etcd_session session_as_void, char *key)
+etcd_get (etcd_session session_as_void, const char *key)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
@@ -296,7 +296,7 @@ parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 etcd_result
-etcd_watch (etcd_session session_as_void, char *pfx,
+etcd_watch (etcd_session session_as_void, const char *pfx,
             char **keyp, char **valuep, int *index_in, int *index_out)
 {
         _etcd_session   *session   = session_as_void;
@@ -369,8 +369,8 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 /* NB: a null value means to use HTTP DELETE and ignore precond/ttl */
 etcd_result
-etcd_put_one (_etcd_session *session, char *key, char *value,
-              char *precond, unsigned int ttl, etcd_server *srv)
+etcd_put_one (_etcd_session *session, const char *key, const char *value,
+              const char *precond, unsigned int ttl, etcd_server *srv)
 {
         char                    *url;
         char                    *contents       = NULL;
@@ -463,8 +463,8 @@ done:
 
 
 etcd_result
-etcd_set (etcd_session session_as_void, char *key, char *value,
-          char *precond, unsigned int ttl)
+etcd_set (etcd_session session_as_void, const char *key, const char *value,
+          const char *precond, unsigned int ttl)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
@@ -494,7 +494,7 @@ etcd_set (etcd_session session_as_void, char *key, char *value,
  * value with a TTL, but I haven't actually tried it.
  */
 etcd_result
-etcd_delete (etcd_session session_as_void, char *key)
+etcd_delete (etcd_session session_as_void, const char *key)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;

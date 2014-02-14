@@ -94,7 +94,7 @@ void            etcd_close_str  (etcd_session session);
  *      key
  *      The etcd key (path) to fetch.
  */
-char *          etcd_get (etcd_session session, char *key);
+char *          etcd_get (etcd_session session, const char *key);
 
 
 /*
@@ -125,7 +125,7 @@ char *          etcd_get (etcd_session session, char *key);
  * the next.  It's entirely legitimate to point both at the same variable.
  */
 
-etcd_result     etcd_watch (etcd_session session, char *pfx,
+etcd_result     etcd_watch (etcd_session session, const char *pfx,
                             char **keyp, char **valuep,
                             int *index_in, int *index_out);
 
@@ -151,8 +151,8 @@ etcd_result     etcd_watch (etcd_session session, char *pfx,
  *      deleted, or zero to mean no auto-expiration.
  */
 
-etcd_result     etcd_set        (etcd_session session, char *key, char *value,
-                                 char *precond, unsigned int ttl);
+etcd_result     etcd_set        (etcd_session session, const char *key, const char *value,
+                                 const char *precond, unsigned int ttl);
 
 
 /*
@@ -164,7 +164,7 @@ etcd_result     etcd_set        (etcd_session session, char *key, char *value,
  *      The etcd key (path) to delete.
  */
 
-etcd_result     etcd_delete     (etcd_session session, char *key);
+etcd_result     etcd_delete     (etcd_session session, const char *key);
 
 
 /*
