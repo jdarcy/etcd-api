@@ -408,14 +408,22 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 }
 
 
+size_t
+parse_lock_response (void *ptr, size_t size, size_t nmemb, void *stream)
+{
+        *((char **)stream) = strdup(ptr);
+        return size*nmemb;
+}
+
+
 /* 
  * There are two use cases, based on is_lock.
  *
- * If is_lock is false, we use the "keys" namespace.  A null value means an
+ * If is_lock is null, we use the "keys" namespace.  A null value means an
  * HTTP DELETE; precond and ttl are both ignored.  Otherwise we're setting a
  * value, with *optional* precond and ttl.
  *
- * If is_lock is true, we use the "locks" namespace.  A null value means an
+ * If is_lock is set, we use the "locks" namespace.  A null value means an
  * HTTP DELETE as before, and we still ignore ttl as before, but now precond
  * must be set to represent the lock index.  Otherwise ttl must be present,
  * and we decide what to do based on precond.  If it's null, this is an
@@ -425,7 +433,7 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 etcd_result
 etcd_set_one (_etcd_session *session, char *key, char *value,
               char *precond, unsigned int ttl, etcd_server *srv,
-              int is_lock)
+              char **is_lock)
 {
         char                    *url;
         char                    *contents       = NULL;
@@ -435,9 +443,10 @@ etcd_set_one (_etcd_session *session, char *key, char *value,
         void                    *err_label      = &&done;
         char                    *namespace;
         char                    *http_cmd;
+        char                    *orig_index;
 
         if (is_lock) {
-                namespace = "locks";
+                namespace = "mod/v2/lock";
                 if (value) {
                         if (!ttl) {
                                 /* Lock/renew must specify ttl. */
@@ -452,44 +461,69 @@ etcd_set_one (_etcd_session *session, char *key, char *value,
                         }
                         http_cmd = "DELETE";
                 }
+                orig_index = *is_lock;
         }
         else {
-                namespace = "keys";
+                namespace = "v2/keys";
                 http_cmd = value ? "PUT" : "DELETE";
         }
 
-        if (asprintf(&url,"http://%s:%u/v2/%s/%s",
+        if (asprintf(&url,"http://%s:%u/%s/%s",
                      srv->host,srv->port,namespace,key) < 0) {
                 goto *err_label;
         }
         err_label = &&free_url;
 
-        if (value) {
-                if (asprintf(&contents,"value=%s",value) < 0) {
-                        goto *err_label;
+        if (is_lock) {
+                if (precond) {
+                        if (asprintf(&contents,"index=%s",precond) < 0) {
+                                goto *err_label;
+                        }
+                        err_label = &&free_contents;
                 }
-                err_label = &&free_contents;
+                if (ttl) {
+                        if (contents) {
+                                char *c2;
+                                if (asprintf(&c2,"ttl=%u;%s",ttl,contents) < 0) {
+                                        goto *err_label;
+                                }
+                                free(contents);
+                                contents = c2;
+                        }
+                        else {
+                                if (asprintf(&contents,"ttl=%u",ttl) < 0) {
+                                        goto *err_label;
+                                }
+                        }
+                        err_label = &&free_contents;
+                }
         }
-
-        if (precond) {
-                char *c2;
-                if (asprintf(&c2,"%s;prevValue=%s",contents,
-                             precond) < 0) {
-                        goto *err_label;
+        else {
+                if (value) {
+                        if (asprintf(&contents,"value=%s",value) < 0) {
+                                goto *err_label;
+                        }
+                        err_label = &&free_contents;
                 }
-                free(contents);
-                contents = c2;
-                err_label = &&free_contents;
-        }
-
-        if (ttl) {
-                char *c2;
-                if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
-                        goto *err_label;
+                if (precond) {
+                        char *c2;
+                        if (asprintf(&c2,"%s;prevValue=%s",contents,
+                                     precond) < 0) {
+                                goto *err_label;
+                        }
+                        free(contents);
+                        contents = c2;
+                        err_label = &&free_contents;
                 }
-                free(contents);
-                contents = c2;
-                err_label = &&free_contents;
+                if (ttl) {
+                        char *c2;
+                        if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
+                                goto *err_label;
+                        }
+                        free(contents);
+                        contents = c2;
+                        err_label = &&free_contents;
+                }
         }
 
         curl = curl_easy_init();
@@ -503,8 +537,19 @@ etcd_set_one (_etcd_session *session, char *key, char *value,
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_POSTREDIR,CURL_REDIR_POST_ALL);
-        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_set_response);
-        curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+
+        if (is_lock && value && !precond) {
+                /* Only do this for an initial lock, not a renewal. */
+                curl_easy_setopt (curl, CURLOPT_WRITEFUNCTION,
+                                  parse_lock_response);
+                curl_easy_setopt(curl,CURLOPT_WRITEDATA,is_lock);
+        }
+        else {
+                curl_easy_setopt (curl, CURLOPT_WRITEFUNCTION,
+                                  parse_set_response);
+                curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+        }
+
         /*
          * CURLOPT_HTTPPOST would be easier, but it looks like etcd will barf on
          * that.  Sigh.
@@ -521,6 +566,28 @@ etcd_set_one (_etcd_session *session, char *key, char *value,
         if (curl_res != CURLE_OK) {
                 print_curl_error("perform",curl_res);
                 goto *err_label;
+        }
+
+        if (is_lock && value) {
+                if (!precond) {
+                        /*
+                         * If this is an initial lock, parse_lock_response would
+                         * have been unable to set "res" for us.  Instead, we
+                         * set it here if the index string got updated.
+                         */
+                        if (*is_lock != orig_index) {
+                                res = ETCD_OK;
+                        }
+                }
+                else {
+                        /*
+                         * If this is a lock renewal, then a successful call
+                         * will pass through neither parse_lock_response nor
+                         * parse_get_response.  The curl response code alone
+                         * is sufficient.
+                         */
+                        res = ETCD_OK;
+                }
         }
 
         /*
@@ -548,7 +615,7 @@ etcd_set (etcd_session session_as_void, char *key, char *value,
         etcd_result     res;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_set_one(session,key,value,precond,ttl,srv,0);
+                res = etcd_set_one(session,key,value,precond,ttl,srv,NULL);
                 /*
                  * Protocol errors are likely to be things like precondition
                  * failures, which won't be helped by retrying on another
@@ -578,7 +645,7 @@ etcd_delete (etcd_session session_as_void, char *key)
         etcd_result     res;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_set_one(session,key,NULL,NULL,0,srv,0);
+                res = etcd_set_one(session,key,NULL,NULL,0,srv,NULL);
                 if (res == ETCD_OK) {
                         break;
                 }
@@ -588,6 +655,46 @@ etcd_delete (etcd_session session_as_void, char *key)
 }
 
 
+etcd_result
+etcd_lock (etcd_session session_as_void, char *key, unsigned int ttl,
+           char *index_in, char **index_out)
+{
+        _etcd_session   *session        = session_as_void;
+        etcd_server     *srv;
+        etcd_result     res;
+        char            *tmp            = NULL;
+
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_set_one(session,key,"hack",index_in,ttl,srv,&tmp);
+                if (res == ETCD_OK) {
+                        if (index_out) {
+                                *index_out = tmp;
+                        }
+                        break;
+                }
+        }
+
+        return res;
+}
+
+
+etcd_result
+etcd_unlock (etcd_session session_as_void, char *key, char *index)
+{
+        _etcd_session   *session   = session_as_void;
+        etcd_server     *srv;
+        etcd_result     res;
+        char            *tmp            = NULL;
+
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_set_one(session,key,NULL,index,0,srv,&tmp);
+                if (res == ETCD_OK) {
+                        break;
+                }
+        }
+
+        return res;
+}
 size_t
 store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
 {

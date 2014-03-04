@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "etcd-api.h"
 
 
@@ -129,6 +130,59 @@ do_set (etcd_session sess, char *key, char *value, char *precond, char *ttl)
 
 
 int
+do_lock (etcd_session sess, char *key, char *ttl, char *index_in)
+{
+        unsigned long   ttl_num         = 0;
+        char            *index_out      = NULL;
+
+        if (!ttl) {
+                return !0;
+        }
+
+        if (index_in) {
+                printf("locking %s (%s) for %s\n",key,index_in,ttl);
+        }
+        else {
+                printf("locking %s for %s\n",key,ttl);
+        }
+
+        /*
+         * It probably seems a bit silly to convert from a string to
+         * number when we're going to do the exact opposite in
+         * etcd_set, but this is just a test program.  In real API
+         * usage we're more likely to have a number in hand.
+         */
+        ttl_num = strtoul(ttl,NULL,10);
+
+        if (etcd_lock(sess,key,ttl_num,index_in,&index_out) != ETCD_OK) {
+                fprintf(stderr,"etcd_lock failed\n");
+                return !0;
+        }
+
+        if (index_out) {
+                printf("got back index number %s\n",index_out);
+                free(index_out);
+        }
+
+        return 0;
+}
+
+
+int
+do_unlock (etcd_session sess, char *key, char *index_in)
+{
+        printf("unlocking %s (%s)\n",key,index_in);
+
+        if (etcd_unlock(sess,key,index_in) != ETCD_OK) {
+                fprintf(stderr,"etcd_unlock failed\n");
+                return !0;
+        }
+
+        return 0;
+}
+
+
+int
 do_delete (etcd_session sess, char *key)
 {
         printf("deleting %s\n",key);
@@ -174,11 +228,13 @@ print_usage (char *prog)
 {
         fprintf (stderr, "Usage: %s [-s server-list] command ...\n",prog);
         fprintf (stderr, "Valid commands:\n");
-        fprintf (stderr, "  get    KEY\n");
-        fprintf (stderr, "  set    [-p precond] [-t ttl] KEY VALUE\n");
-        fprintf (stderr, "  delete KEY\n");
-        fprintf (stderr, "  watch  [-i index] KEY\n");
+        fprintf (stderr, "  get       KEY\n");
+        fprintf (stderr, "  set       [-p precond] [-t ttl] KEY VALUE\n");
+        fprintf (stderr, "  delete    KEY\n");
+        fprintf (stderr, "  watch     [-i index] KEY\n");
         fprintf (stderr, "  leader\n");
+        fprintf (stderr, "  lock     -t ttl [-i index] KEY\n");
+        fprintf (stderr, "  unlock    -i index KEY\n");
         fprintf (stderr, "Server list is host:port pairs separated by comma,\n"
                          "semicolon, or white space.  If not given on the\n"
                          "command line, ETCD_SERVERS will be used from the\n"
@@ -229,17 +285,6 @@ main (int argc, char **argv)
         if (optind == argc) {
                 return print_usage(argv[0]);
         }
-        /*
-         * Only check for inappropriate flags here.  Missing arguments are
-         * handled in the per-command code.
-         */
-        command = argv[optind++];
-        if ((precond || ttl) && strcasecmp(command,"set")) {
-                return print_usage(argv[0]);
-        }
-        if (index_str && strcasecmp(command,"delete")) {
-                return print_usage(argv[0]);
-        }
 
         sess = etcd_open_str(strdup(servers));
         if (!sess) {
@@ -247,15 +292,17 @@ main (int argc, char **argv)
                 return !0;
         }
 
+        command = argv[optind++];
+
         if (!strcasecmp(command,"get")) {
-                if ((argc-optind) == 1) {
+                if (((argc-optind) == 1) && !precond && !ttl && !index_str) {
                         parsed = 1;
                         res = do_get(sess,argv[optind]);
                 }
         }
 
         else if (!strcasecmp(command,"set")) {
-                if ((argc-optind) == 2) {
+                if (((argc-optind) == 2) && !index_str) {
                         parsed = 1;
                         res = do_set (sess, argv[optind], argv[optind+1],
                                       precond, ttl);
@@ -263,23 +310,37 @@ main (int argc, char **argv)
         }
 
         else if (!strcasecmp(command,"delete")) {
-                if ((argc-optind) == 1) {
+                if (((argc-optind) == 1) && !precond && !ttl && !index_str) {
                         parsed = 1;
                         res = do_delete(sess,argv[optind]);
                 }
         }
 
         else if (!strcasecmp(command,"watch")) {
-                if ((argc-optind) == 1) {
+                if (((argc-optind) == 1) && !precond && !ttl) {
                         parsed = 1;
                         res = do_watch(sess,argv[optind],index_str);
                 }
         }
 
         else if (!strcasecmp(command,"leader")) {
-                if ((argc-optind) == 0) {
+                if (((argc-optind) == 0) && !precond && !ttl && !index_str) {
                         parsed = 1;
                         res = do_leader(sess);
+                }
+        }
+
+        else if (!strcasecmp(command,"lock")) {
+                if (((argc-optind) == 1) && !precond && ttl) {
+                        parsed = 1;
+                        res = do_lock(sess,argv[optind],ttl,index_str);
+                }
+        }
+
+        else if (!strcasecmp(command,"unlock")) {
+                if (((argc-optind) == 1) && !precond && !ttl && index_str) {
+                        parsed = 1;
+                        res = do_unlock(sess,argv[optind],index_str);
                 }
         }
 
