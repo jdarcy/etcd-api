@@ -55,6 +55,8 @@ typedef size_t curl_callback_t (void *, size_t, size_t, void *);
 
 int             g_inited        = 0;
 const char      *value_path[]   = { "node", "value", NULL };
+const char      *nodes_path[]   = { "node", "nodes", NULL };
+const char      *entry_path[]   = { "key", NULL };
 
 /*
  * We only call this in case where it should be safe, but gcc doesn't know
@@ -113,26 +115,70 @@ etcd_close (etcd_session session)
 }
 
 /*
+ * Normal yajl_tree_get is returning NULL for these paths even when I can
+ * verify (in gdb) that they exist.  I suppose I could debug this for them, but
+ * this is way easier.
+ *
+ * TBD: see if common distros are packaging a JSON library that isn't total
+ * crap.
+ */
+yajl_val
+my_yajl_tree_get (yajl_val root, char const **path, yajl_type type)
+{
+        yajl_val        obj    = root;
+        int             i;
+
+        for (;;) {
+                if (!*path) {
+                        if (obj && (obj->type != type)) {
+                                return NULL;
+                        }
+                        return obj;
+                }
+                if (obj->type != yajl_t_object) {
+                        return NULL;
+                }
+                for (i = 0; /* nothing */; ++i) {
+                        if (i >= obj->u.object.len) {
+                                return NULL;
+                        }
+                        if (!strcmp(obj->u.object.keys[i],*path)) {
+                                obj = obj->u.object.values[i];
+                                ++path;
+                                break;
+                        }
+                }
+        }
+}
+
+
+/*
  * Looking directly at node->u.array seems terribly un-modular, but the YAJL
  * tree interface doesn't seem to have any exposed API for iterating over the
  * elements of an array.  I tried using yajl_tree_get with an index in the
  * path, either as a type-casted integer or as a string, but that didn't work.
  */
 char *
-parse_array_response (yajl_val node)
+parse_array_response (yajl_val parent)
 {
         size_t          i;
         yajl_val        item;
         yajl_val        value;
         char            *retval = NULL;
         char            *saved;
+        yajl_val        node;
+
+        node = my_yajl_tree_get(parent,nodes_path,yajl_t_array);
+        if (!node) {
+                return NULL;
+        }
 
         for (i = 0; i < node->u.array.len; ++i) {
                 item = node->u.array.values[i];
                 if (!item) {
                         break;
                 }
-                value = yajl_tree_get(item,value_path,yajl_t_string);
+                value = my_yajl_tree_get(item,entry_path,yajl_t_string);
                 if (!value) {
                         break;
                 }
@@ -161,9 +207,8 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
         yajl_val        value;
 
         node = yajl_tree_parse(ptr,NULL,0);
-        if (node) switch (node->type) {
-        case yajl_t_object:
-                value = yajl_tree_get(node,value_path,yajl_t_string);
+        if (node) {
+                value = my_yajl_tree_get(node,value_path,yajl_t_string);
                 if (value) {
                         /* 
                          * YAJL probably copied it once, now we're going to
@@ -175,15 +220,13 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
                          */
                         *((char **)stream) = strdup(MY_YAJL_GET_STRING(value));
                 }
-                break;
-        case yajl_t_array:
-                *((char **)stream) = parse_array_response(node);
-                break;
-        default:
-                ;
+                else {
+                        /* Might as well try this. */
+                        *((char **)stream) = parse_array_response(node);
+                }
+                yajl_tree_free(node);
         }
 
-        yajl_tree_free(node);
         return size*nmemb;
 }
 
@@ -202,6 +245,7 @@ etcd_get_one (_etcd_session *session, char *key, etcd_server *srv, char *prefix,
                      srv->host,srv->port,prefix,key) < 0) {
                 goto *err_label;
         }
+        printf("url = %s\n",url);
         err_label = &&free_url;
 
         curl = curl_easy_init();
@@ -266,28 +310,24 @@ parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
         yajl_val                node;
         yajl_val                value;
         etcd_watch_t            *watch  = stream;
-        static const char       *i_path[] = { "index", NULL };
-        static const char       *k_path[] = { "key", NULL };
-        static const char       *v_path[] = { "value", NULL };
+        static const char       *i_path[] = { "node", "modifiedIndex", NULL };
+        static const char       *k_path[] = { "node", "key", NULL };
+        static const char       *v_path[] = { "node", "value", NULL };
 
         node = yajl_tree_parse(ptr,NULL,0);
         if (node) {
-                value = yajl_tree_get(node,i_path,yajl_t_number);
+                value = my_yajl_tree_get(node,i_path,yajl_t_number);
                 if (value) {
                         watch->index_out = strtoul(YAJL_GET_NUMBER(value),
                                                    NULL,10);
                 }
-                value = yajl_tree_get(node,k_path,yajl_t_string);
+                value = my_yajl_tree_get(node,k_path,yajl_t_string);
                 if (value) {
                         watch->key = strdup(MY_YAJL_GET_STRING(value));
                 }
-                value = yajl_tree_get(node,v_path,yajl_t_string);
+                value = my_yajl_tree_get(node,v_path,yajl_t_string);
                 if (value) {
                         watch->value = strdup(MY_YAJL_GET_STRING(value));
-                }
-                else {
-                        /* Must have been a DELETE. */
-                        watch->value = NULL;
                 }
         }
 
@@ -303,24 +343,27 @@ etcd_watch (etcd_session session_as_void, char *pfx,
         etcd_server     *srv;
         etcd_result     res;
         etcd_watch_t    watch;
-        char            *post;
+        char            *path;
 
         if (index_in) {
-                if (asprintf(&post,"index=%d",*index_in) < 0) {
+                if (asprintf(&path,"%s?wait=true&recursive=true&waitIndex=%d",
+                             pfx,*index_in) < 0) {
                         return ETCD_WTF;
                 }
         }
         else {
-                post = NULL;
+                if (asprintf(&path,"%s?wait=true&recursive=true",pfx) < 0) {
+                        return ETCD_WTF;
+                }
         }
 
-        memset(&watch.key,0,sizeof(watch));
+        memset(&watch,0,sizeof(watch));
         watch.index_in = index_in;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_get_one(session,pfx,srv,"watch/",post,
+                res = etcd_get_one(session,path,srv,"keys/",NULL,
                                    parse_watch_response,(char **)&watch);
-                if ((res == ETCD_OK) && watch.key) {
+                if (res == ETCD_OK) {
                         if (keyp) {
                                 *keyp = watch.key;
                         }
@@ -334,9 +377,7 @@ etcd_watch (etcd_session session_as_void, char *pfx,
                 }
         }
 
-        if (post) {
-                free(post);
-        }
+        free(path);
         return res;
 }
 
@@ -356,7 +397,7 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
         node = yajl_tree_parse(ptr,NULL,0);
         if (node) {
-                value = yajl_tree_get(node,path,yajl_t_number);
+                value = my_yajl_tree_get(node,path,yajl_t_number);
                 if (value) {
                         res = ETCD_OK;
                 }

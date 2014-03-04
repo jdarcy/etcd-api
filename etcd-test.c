@@ -70,21 +70,33 @@ do_watch (etcd_session sess, char *pfx, char *index_str)
         }
 
         for (;;) {
+                if (indexp) {
+                        printf("issuing watch with index %ld\n",index_i);
+                }
+                else {
+                        printf("issuing watch with NO index\n");
+                }
                 res = etcd_watch(sess,pfx,&key,&value,indexp,&index_i);
                 if (res != ETCD_OK) {
                         fprintf(stderr,"etcd_watch failed\n");
                         return !0;
                 }
-                if (value) {
-                        printf("key %s was set to %s\n",key,value);
-                        free(value);
+                printf("index is %d\n",index_i++);
+                if (key) {
+                        if (value) {
+                                printf("key %s was set to %s\n",key,value);
+                                free(value);
+                        }
+                        else {
+                                printf("key %s was deleted\n",key);
+                        }
+                        free(key);
                 }
                 else {
-                        printf("key %s was deleted\n",key);
+                        printf("I don't know what happened\n");
                 }
-                free(key);
-                printf("index is %d\n",index_i++);
                 indexp = &index_i;
+                sleep(1);
         }
         return 0;
 }
