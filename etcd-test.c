@@ -70,12 +70,6 @@ do_watch (etcd_session sess, char *pfx, char *index_str)
         }
 
         for (;;) {
-                if (indexp) {
-                        printf("issuing watch with index %ld\n",index_i);
-                }
-                else {
-                        printf("issuing watch with NO index\n");
-                }
                 res = etcd_watch(sess,pfx,&key,&value,indexp,&index_i);
                 if (res != ETCD_OK) {
                         fprintf(stderr,"etcd_watch failed\n");

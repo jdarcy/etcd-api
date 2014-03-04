@@ -408,10 +408,24 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 }
 
 
-/* NB: a null value means to use HTTP DELETE and ignore precond/ttl */
+/* 
+ * There are two use cases, based on is_lock.
+ *
+ * If is_lock is false, we use the "keys" namespace.  A null value means an
+ * HTTP DELETE; precond and ttl are both ignored.  Otherwise we're setting a
+ * value, with *optional* precond and ttl.
+ *
+ * If is_lock is true, we use the "locks" namespace.  A null value means an
+ * HTTP DELETE as before, and we still ignore ttl as before, but now precond
+ * must be set to represent the lock index.  Otherwise ttl must be present,
+ * and we decide what to do based on precond.  If it's null, this is an
+ * initial lock so we use an HTTP POST.  Otherwise it's a renewal so we use
+ * an HTTP PUT instead.
+ */
 etcd_result
-etcd_put_one (_etcd_session *session, char *key, char *value,
-              char *precond, unsigned int ttl, etcd_server *srv)
+etcd_set_one (_etcd_session *session, char *key, char *value,
+              char *precond, unsigned int ttl, etcd_server *srv,
+              int is_lock)
 {
         char                    *url;
         char                    *contents       = NULL;
@@ -419,9 +433,33 @@ etcd_put_one (_etcd_session *session, char *key, char *value,
         etcd_result             res             = ETCD_WTF;
         CURLcode                curl_res;
         void                    *err_label      = &&done;
+        char                    *namespace;
+        char                    *http_cmd;
 
-        if (asprintf(&url,"http://%s:%u/v2/keys/%s",
-                     srv->host,srv->port,key) < 0) {
+        if (is_lock) {
+                namespace = "locks";
+                if (value) {
+                        if (!ttl) {
+                                /* Lock/renew must specify ttl. */
+                                return ETCD_WTF;
+                        }
+                        http_cmd = precond ? "PUT" : "POST";
+                }
+                else {
+                        if (!precond) {
+                                /* Unlock must specify index. */
+                                return ETCD_WTF;
+                        }
+                        http_cmd = "DELETE";
+                }
+        }
+        else {
+                namespace = "keys";
+                http_cmd = value ? "PUT" : "DELETE";
+        }
+
+        if (asprintf(&url,"http://%s:%u/v2/%s/%s",
+                     srv->host,srv->port,namespace,key) < 0) {
                 goto *err_label;
         }
         err_label = &&free_url;
@@ -431,25 +469,27 @@ etcd_put_one (_etcd_session *session, char *key, char *value,
                         goto *err_label;
                 }
                 err_label = &&free_contents;
+        }
 
-                if (precond) {
-                        char *c2;
-                        if (asprintf(&c2,"%s;prevValue=%s",contents,
-                                     precond) < 0) {
-                                goto *err_label;
-                        }
-                        free(contents);
-                        contents = c2;
+        if (precond) {
+                char *c2;
+                if (asprintf(&c2,"%s;prevValue=%s",contents,
+                             precond) < 0) {
+                        goto *err_label;
                 }
+                free(contents);
+                contents = c2;
+                err_label = &&free_contents;
+        }
 
-                if (ttl) {
-                        char *c2;
-                        if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
-                                goto *err_label;
-                        }
-                        free(contents);
-                        contents = c2;
+        if (ttl) {
+                char *c2;
+                if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
+                        goto *err_label;
                 }
+                free(contents);
+                contents = c2;
+                err_label = &&free_contents;
         }
 
         curl = curl_easy_init();
@@ -459,23 +499,19 @@ etcd_put_one (_etcd_session *session, char *key, char *value,
         err_label = &&cleanup_curl;
 
         /* TBD: add error checking for these */
-        curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,"PUT");
+        curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,http_cmd);
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_POSTREDIR,CURL_REDIR_POST_ALL);
         curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_set_response);
         curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
-        if (value) {
-                /*
-                 * CURLOPT_HTTPPOST would be easier, but it looks like etcd
-                 * will barf on that.  Sigh.
-                 */
+        /*
+         * CURLOPT_HTTPPOST would be easier, but it looks like etcd will barf on
+         * that.  Sigh.
+         */
+        if (contents) {
                 curl_easy_setopt(curl,CURLOPT_POST,1L);
                 curl_easy_setopt(curl,CURLOPT_POSTFIELDS,contents);
-        }
-        else {
-                /* This must be a DELETE. */
-                curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,"DELETE");
         }
 #if defined(DEBUG)
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
@@ -512,7 +548,7 @@ etcd_set (etcd_session session_as_void, char *key, char *value,
         etcd_result     res;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_put_one(session,key,value,precond,ttl,srv);
+                res = etcd_set_one(session,key,value,precond,ttl,srv,0);
                 /*
                  * Protocol errors are likely to be things like precondition
                  * failures, which won't be helped by retrying on another
@@ -542,7 +578,7 @@ etcd_delete (etcd_session session_as_void, char *key)
         etcd_result     res;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_put_one(session,key,NULL,NULL,0,srv);
+                res = etcd_set_one(session,key,NULL,NULL,0,srv,0);
                 if (res == ETCD_OK) {
                         break;
                 }
