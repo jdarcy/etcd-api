@@ -168,24 +168,23 @@ do_leader (etcd_session sess)
 
 
 struct option my_opts[] = {
-        { "delete",     no_argument,            NULL,   'd' },
         { "index",      required_argument,      NULL,   'w' },
         { "precond",    required_argument,      NULL,   'p' },
         { "servers",    required_argument,      NULL,   's' },
         { "ttl",        required_argument,      NULL,   't' },
-        { "watch",      no_argument,            NULL,   'w' },
         { NULL }
 };
 
 int
 print_usage (char *prog)
 {
-        fprintf (stderr, "Usage: %s [-s server-list] ...\n",prog);
-        fprintf (stderr, "  for get:    key\n");
-        fprintf (stderr, "  for set:    [-p precond] [-t ttl] key value\n");
-        fprintf (stderr, "  for delete: -d key\n");
-        fprintf (stderr, "  for watch:  -w [-i index] key\n");
-        fprintf (stderr, "  for leader: (no cmd-args)\n");
+        fprintf (stderr, "Usage: %s [-s server-list] command ...\n",prog);
+        fprintf (stderr, "Valid commands:\n");
+        fprintf (stderr, "  get    KEY\n");
+        fprintf (stderr, "  set    [-p precond] [-t ttl] KEY VALUE\n");
+        fprintf (stderr, "  delete KEY\n");
+        fprintf (stderr, "  watch  [-i index] KEY\n");
+        fprintf (stderr, "  leader\n");
         fprintf (stderr, "Server list is host:port pairs separated by comma,\n"
                          "semicolon, or white space.  If not given on the\n"
                          "command line, ETCD_SERVERS will be used from the\n"
@@ -199,23 +198,20 @@ main (int argc, char **argv)
 {
         int             opt;
         char            *servers        = getenv("ETCD_SERVERS");
-        int             delete          = 0;
-        int             watch           = 0;
+        char            *command;
         char            *precond        = NULL;
         char            *ttl            = NULL;
         char            *index_str      = NULL;
         etcd_session    sess;
-        int             res;
+        int             res             = !0;
+        int             parsed          = 0;
 
         for (;;) {
-                opt = getopt_long(argc,argv,"di:p:s:t:w",my_opts,NULL);
+                opt = getopt_long(argc,argv,"i:p:s:t:",my_opts,NULL);
                 if (opt == (-1)) {
                         break;
                 }
                 switch (opt) {
-                case 'd':
-                        delete = 1;
-                        break;
                 case 'i':
                         index_str = optarg;
                         break;
@@ -228,9 +224,6 @@ main (int argc, char **argv)
                 case 't':
                         ttl = optarg;
                         break;
-                case 'w':
-                        watch = 1;
-                        break;
                 default:
                         return print_usage(argv[0]);
                 }
@@ -239,13 +232,18 @@ main (int argc, char **argv)
         if (!servers) {
                 return print_usage(argv[0]);
         }
-        if ((delete || watch) && ((argc - optind) != 1)) {
+        if (optind == argc) {
                 return print_usage(argv[0]);
         }
-        if ((watch && delete) || (!watch && index_str)) {
+        /*
+         * Only check for inappropriate flags here.  Missing arguments are
+         * handled in the per-command code.
+         */
+        command = argv[optind++];
+        if ((precond || ttl) && strcasecmp(command,"set")) {
                 return print_usage(argv[0]);
         }
-        if ((precond || ttl) && ((argc - optind) != 2)) {
+        if (index_str && strcasecmp(command,"delete")) {
                 return print_usage(argv[0]);
         }
 
@@ -255,28 +253,42 @@ main (int argc, char **argv)
                 return !0;
         }
 
-        switch (argc - optind) {
-        case 0:
-                res = do_leader(sess);
-                break;
-        case 1:
-                if (delete) {
-                        res = do_delete(sess,argv[optind]);
-                }
-                else if (watch) {
-                        res = do_watch(sess,argv[optind],index_str);
-                }
-                else {
+        if (!strcasecmp(command,"get")) {
+                if ((argc-optind) == 1) {
+                        parsed = 1;
                         res = do_get(sess,argv[optind]);
                 }
-                break;
-        case 2:
-                res = do_set(sess,argv[optind],argv[optind+1],precond,ttl);
-                break;
-        default:
-                return print_usage(argv[0]);
+        }
+
+        else if (!strcasecmp(command,"set")) {
+                if ((argc-optind) == 2) {
+                        parsed = 1;
+                        res = do_set (sess, argv[optind], argv[optind+1],
+                                      precond, ttl);
+                }
+        }
+
+        else if (!strcasecmp(command,"delete")) {
+                if ((argc-optind) == 1) {
+                        parsed = 1;
+                        res = do_delete(sess,argv[optind]);
+                }
+        }
+
+        else if (!strcasecmp(command,"watch")) {
+                if ((argc-optind) == 1) {
+                        parsed = 1;
+                        res = do_watch(sess,argv[optind],index_str);
+                }
+        }
+
+        else if (!strcasecmp(command,"leader")) {
+                if ((argc-optind) == 0) {
+                        parsed = 1;
+                        res = do_leader(sess);
+                }
         }
 
         etcd_close_str(sess);
-        return res;
+        return parsed ? res : print_usage(argv[0]);
 }
