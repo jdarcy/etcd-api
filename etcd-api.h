@@ -174,3 +174,41 @@ etcd_result     etcd_delete     (etcd_session session, const char *key);
  */
 
 char *          etcd_leader     (etcd_session session);
+
+/*
+ * etcd_lock
+ *
+ * Take or renew a lock - really a lease but the etcd folks call it a lock so
+ * we'll follow suit.
+ *
+ *      key
+ *      The path (in the "locks" namespace) for the lock.
+ *
+ *      ttl
+ *      Time in seconds for the lock.
+ *
+ *      index_in (optional, indicates renewal)
+ *      Lock index from previous lock call.
+ *
+ *      index_out (only used for initial lock)
+ *      Place for the new lock index.  You must free this.
+ */
+
+etcd_result     etcd_lock (etcd_session session_as_void, char *key,
+                           unsigned int ttl, char *index_in, char **index_out);
+
+/*
+ * etcd_unlock
+ *
+ * Release a lock (see etcd_lock regarding terminology).
+ *
+ *      key
+ *      The path (in the "locks" namespace) for the lock.
+ *
+ *      index
+ *      Lock index from previous lock call.
+ */
+
+etcd_result     etcd_unlock (etcd_session session_as_void, char *key,
+                             char *index);
+

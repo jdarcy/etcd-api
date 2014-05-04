@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "etcd-api.h"
 
 
@@ -75,16 +76,22 @@ do_watch (etcd_session sess, char *pfx, char *index_str)
                         fprintf(stderr,"etcd_watch failed\n");
                         return !0;
                 }
-                if (value) {
-                        printf("key %s was set to %s\n",key,value);
-                        free(value);
+                printf("index is %d\n",index_i++);
+                if (key) {
+                        if (value) {
+                                printf("key %s was set to %s\n",key,value);
+                                free(value);
+                        }
+                        else {
+                                printf("key %s was deleted\n",key);
+                        }
+                        free(key);
                 }
                 else {
-                        printf("key %s was deleted\n",key);
+                        printf("I don't know what happened\n");
                 }
-                free(key);
-                printf("index is %d\n",index_i++);
                 indexp = &index_i;
+                sleep(1);
         }
         return 0;
 }
@@ -115,6 +122,59 @@ do_set (etcd_session sess, char *key, char *value, char *precond, char *ttl)
 
         if (etcd_set(sess,key,value,precond,ttl_num) != ETCD_OK) {
                 fprintf(stderr,"etcd_set failed\n");
+                return !0;
+        }
+
+        return 0;
+}
+
+
+int
+do_lock (etcd_session sess, char *key, char *ttl, char *index_in)
+{
+        unsigned long   ttl_num         = 0;
+        char            *index_out      = NULL;
+
+        if (!ttl) {
+                return !0;
+        }
+
+        if (index_in) {
+                printf("locking %s (%s) for %s\n",key,index_in,ttl);
+        }
+        else {
+                printf("locking %s for %s\n",key,ttl);
+        }
+
+        /*
+         * It probably seems a bit silly to convert from a string to
+         * number when we're going to do the exact opposite in
+         * etcd_set, but this is just a test program.  In real API
+         * usage we're more likely to have a number in hand.
+         */
+        ttl_num = strtoul(ttl,NULL,10);
+
+        if (etcd_lock(sess,key,ttl_num,index_in,&index_out) != ETCD_OK) {
+                fprintf(stderr,"etcd_lock failed\n");
+                return !0;
+        }
+
+        if (index_out) {
+                printf("got back index number %s\n",index_out);
+                free(index_out);
+        }
+
+        return 0;
+}
+
+
+int
+do_unlock (etcd_session sess, char *key, char *index_in)
+{
+        printf("unlocking %s (%s)\n",key,index_in);
+
+        if (etcd_unlock(sess,key,index_in) != ETCD_OK) {
+                fprintf(stderr,"etcd_unlock failed\n");
                 return !0;
         }
 
@@ -156,24 +216,25 @@ do_leader (etcd_session sess)
 
 
 struct option my_opts[] = {
-        { "delete",     no_argument,            NULL,   'd' },
         { "index",      required_argument,      NULL,   'w' },
         { "precond",    required_argument,      NULL,   'p' },
         { "servers",    required_argument,      NULL,   's' },
         { "ttl",        required_argument,      NULL,   't' },
-        { "watch",      no_argument,            NULL,   'w' },
         { NULL }
 };
 
 int
 print_usage (char *prog)
 {
-        fprintf (stderr, "Usage: %s [-s server-list] ...\n",prog);
-        fprintf (stderr, "  for get:    key\n");
-        fprintf (stderr, "  for set:    [-p precond] [-t ttl] key value\n");
-        fprintf (stderr, "  for delete: -d key\n");
-        fprintf (stderr, "  for watch:  -w [-i index] key\n");
-        fprintf (stderr, "  for leader: (no cmd-args)\n");
+        fprintf (stderr, "Usage: %s [-s server-list] command ...\n",prog);
+        fprintf (stderr, "Valid commands:\n");
+        fprintf (stderr, "  get       KEY\n");
+        fprintf (stderr, "  set       [-p precond] [-t ttl] KEY VALUE\n");
+        fprintf (stderr, "  delete    KEY\n");
+        fprintf (stderr, "  watch     [-i index] KEY\n");
+        fprintf (stderr, "  leader\n");
+        fprintf (stderr, "  lock     -t ttl [-i index] KEY\n");
+        fprintf (stderr, "  unlock    -i index KEY\n");
         fprintf (stderr, "Server list is host:port pairs separated by comma,\n"
                          "semicolon, or white space.  If not given on the\n"
                          "command line, ETCD_SERVERS will be used from the\n"
@@ -187,23 +248,20 @@ main (int argc, char **argv)
 {
         int             opt;
         char            *servers        = getenv("ETCD_SERVERS");
-        int             delete          = 0;
-        int             watch           = 0;
+        char            *command;
         char            *precond        = NULL;
         char            *ttl            = NULL;
         char            *index_str      = NULL;
         etcd_session    sess;
-        int             res;
+        int             res             = !0;
+        int             parsed          = 0;
 
         for (;;) {
-                opt = getopt_long(argc,argv,"di:p:s:t:w",my_opts,NULL);
+                opt = getopt_long(argc,argv,"i:p:s:t:",my_opts,NULL);
                 if (opt == (-1)) {
                         break;
                 }
                 switch (opt) {
-                case 'd':
-                        delete = 1;
-                        break;
                 case 'i':
                         index_str = optarg;
                         break;
@@ -216,9 +274,6 @@ main (int argc, char **argv)
                 case 't':
                         ttl = optarg;
                         break;
-                case 'w':
-                        watch = 1;
-                        break;
                 default:
                         return print_usage(argv[0]);
                 }
@@ -227,13 +282,7 @@ main (int argc, char **argv)
         if (!servers) {
                 return print_usage(argv[0]);
         }
-        if ((delete || watch) && ((argc - optind) != 1)) {
-                return print_usage(argv[0]);
-        }
-        if ((watch && delete) || (!watch && index_str)) {
-                return print_usage(argv[0]);
-        }
-        if ((precond || ttl) && ((argc - optind) != 2)) {
+        if (optind == argc) {
                 return print_usage(argv[0]);
         }
 
@@ -243,28 +292,58 @@ main (int argc, char **argv)
                 return !0;
         }
 
-        switch (argc - optind) {
-        case 0:
-                res = do_leader(sess);
-                break;
-        case 1:
-                if (delete) {
-                        res = do_delete(sess,argv[optind]);
-                }
-                else if (watch) {
-                        res = do_watch(sess,argv[optind],index_str);
-                }
-                else {
+        command = argv[optind++];
+
+        if (!strcasecmp(command,"get")) {
+                if (((argc-optind) == 1) && !precond && !ttl && !index_str) {
+                        parsed = 1;
                         res = do_get(sess,argv[optind]);
                 }
-                break;
-        case 2:
-                res = do_set(sess,argv[optind],argv[optind+1],precond,ttl);
-                break;
-        default:
-                return print_usage(argv[0]);
+        }
+
+        else if (!strcasecmp(command,"set")) {
+                if (((argc-optind) == 2) && !index_str) {
+                        parsed = 1;
+                        res = do_set (sess, argv[optind], argv[optind+1],
+                                      precond, ttl);
+                }
+        }
+
+        else if (!strcasecmp(command,"delete")) {
+                if (((argc-optind) == 1) && !precond && !ttl && !index_str) {
+                        parsed = 1;
+                        res = do_delete(sess,argv[optind]);
+                }
+        }
+
+        else if (!strcasecmp(command,"watch")) {
+                if (((argc-optind) == 1) && !precond && !ttl) {
+                        parsed = 1;
+                        res = do_watch(sess,argv[optind],index_str);
+                }
+        }
+
+        else if (!strcasecmp(command,"leader")) {
+                if (((argc-optind) == 0) && !precond && !ttl && !index_str) {
+                        parsed = 1;
+                        res = do_leader(sess);
+                }
+        }
+
+        else if (!strcasecmp(command,"lock")) {
+                if (((argc-optind) == 1) && !precond && ttl) {
+                        parsed = 1;
+                        res = do_lock(sess,argv[optind],ttl,index_str);
+                }
+        }
+
+        else if (!strcasecmp(command,"unlock")) {
+                if (((argc-optind) == 1) && !precond && !ttl && index_str) {
+                        parsed = 1;
+                        res = do_unlock(sess,argv[optind],index_str);
+                }
         }
 
         etcd_close_str(sess);
-        return res;
+        return parsed ? res : print_usage(argv[0]);
 }

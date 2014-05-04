@@ -55,6 +55,8 @@ typedef size_t curl_callback_t (void *, size_t, size_t, void *);
 
 int             g_inited        = 0;
 const char      *value_path[]   = { "node", "value", NULL };
+const char      *nodes_path[]   = { "node", "nodes", NULL };
+const char      *entry_path[]   = { "key", NULL };
 
 /*
  * We only call this in case where it should be safe, but gcc doesn't know
@@ -113,26 +115,70 @@ etcd_close (etcd_session session)
 }
 
 /*
+ * Normal yajl_tree_get is returning NULL for these paths even when I can
+ * verify (in gdb) that they exist.  I suppose I could debug this for them, but
+ * this is way easier.
+ *
+ * TBD: see if common distros are packaging a JSON library that isn't total
+ * crap.
+ */
+yajl_val
+my_yajl_tree_get (yajl_val root, char const **path, yajl_type type)
+{
+        yajl_val        obj    = root;
+        int             i;
+
+        for (;;) {
+                if (!*path) {
+                        if (obj && (obj->type != type)) {
+                                return NULL;
+                        }
+                        return obj;
+                }
+                if (obj->type != yajl_t_object) {
+                        return NULL;
+                }
+                for (i = 0; /* nothing */; ++i) {
+                        if (i >= obj->u.object.len) {
+                                return NULL;
+                        }
+                        if (!strcmp(obj->u.object.keys[i],*path)) {
+                                obj = obj->u.object.values[i];
+                                ++path;
+                                break;
+                        }
+                }
+        }
+}
+
+
+/*
  * Looking directly at node->u.array seems terribly un-modular, but the YAJL
  * tree interface doesn't seem to have any exposed API for iterating over the
  * elements of an array.  I tried using yajl_tree_get with an index in the
  * path, either as a type-casted integer or as a string, but that didn't work.
  */
 char *
-parse_array_response (yajl_val node)
+parse_array_response (yajl_val parent)
 {
         size_t          i;
         yajl_val        item;
         yajl_val        value;
         char            *retval = NULL;
         char            *saved;
+        yajl_val        node;
+
+        node = my_yajl_tree_get(parent,nodes_path,yajl_t_array);
+        if (!node) {
+                return NULL;
+        }
 
         for (i = 0; i < node->u.array.len; ++i) {
                 item = node->u.array.values[i];
                 if (!item) {
                         break;
                 }
-                value = yajl_tree_get(item,value_path,yajl_t_string);
+                value = my_yajl_tree_get(item,entry_path,yajl_t_string);
                 if (!value) {
                         break;
                 }
@@ -161,9 +207,8 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
         yajl_val        value;
 
         node = yajl_tree_parse(ptr,NULL,0);
-        if (node) switch (node->type) {
-        case yajl_t_object:
-                value = yajl_tree_get(node,value_path,yajl_t_string);
+        if (node) {
+                value = my_yajl_tree_get(node,value_path,yajl_t_string);
                 if (value) {
                         /* 
                          * YAJL probably copied it once, now we're going to
@@ -175,15 +220,13 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
                          */
                         *((char **)stream) = strdup(MY_YAJL_GET_STRING(value));
                 }
-                break;
-        case yajl_t_array:
-                *((char **)stream) = parse_array_response(node);
-                break;
-        default:
-                ;
+                else {
+                        /* Might as well try this. */
+                        *((char **)stream) = parse_array_response(node);
+                }
+                yajl_tree_free(node);
         }
 
-        yajl_tree_free(node);
         return size*nmemb;
 }
 
@@ -202,6 +245,7 @@ etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const c
                      srv->host,srv->port,prefix,key) < 0) {
                 goto *err_label;
         }
+        printf("url = %s\n",url);
         err_label = &&free_url;
 
         curl = curl_easy_init();
@@ -266,28 +310,24 @@ parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
         yajl_val                node;
         yajl_val                value;
         etcd_watch_t            *watch  = stream;
-        static const char       *i_path[] = { "index", NULL };
-        static const char       *k_path[] = { "key", NULL };
-        static const char       *v_path[] = { "value", NULL };
+        static const char       *i_path[] = { "node", "modifiedIndex", NULL };
+        static const char       *k_path[] = { "node", "key", NULL };
+        static const char       *v_path[] = { "node", "value", NULL };
 
         node = yajl_tree_parse(ptr,NULL,0);
         if (node) {
-                value = yajl_tree_get(node,i_path,yajl_t_number);
+                value = my_yajl_tree_get(node,i_path,yajl_t_number);
                 if (value) {
                         watch->index_out = strtoul(YAJL_GET_NUMBER(value),
                                                    NULL,10);
                 }
-                value = yajl_tree_get(node,k_path,yajl_t_string);
+                value = my_yajl_tree_get(node,k_path,yajl_t_string);
                 if (value) {
                         watch->key = strdup(MY_YAJL_GET_STRING(value));
                 }
-                value = yajl_tree_get(node,v_path,yajl_t_string);
+                value = my_yajl_tree_get(node,v_path,yajl_t_string);
                 if (value) {
                         watch->value = strdup(MY_YAJL_GET_STRING(value));
-                }
-                else {
-                        /* Must have been a DELETE. */
-                        watch->value = NULL;
                 }
         }
 
@@ -303,24 +343,27 @@ etcd_watch (etcd_session session_as_void, const char *pfx,
         etcd_server     *srv;
         etcd_result     res;
         etcd_watch_t    watch;
-        char            *post;
+        char            *path;
 
         if (index_in) {
-                if (asprintf(&post,"index=%d",*index_in) < 0) {
+                if (asprintf(&path,"%s?wait=true&recursive=true&waitIndex=%d",
+                             pfx,*index_in) < 0) {
                         return ETCD_WTF;
                 }
         }
         else {
-                post = NULL;
+                if (asprintf(&path,"%s?wait=true&recursive=true",pfx) < 0) {
+                        return ETCD_WTF;
+                }
         }
 
-        memset(&watch.key,0,sizeof(watch));
+        memset(&watch,0,sizeof(watch));
         watch.index_in = index_in;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_get_one(session,pfx,srv,"watch/",post,
+                res = etcd_get_one(session,path,srv,"keys/",NULL,
                                    parse_watch_response,(char **)&watch);
-                if ((res == ETCD_OK) && watch.key) {
+                if (res == ETCD_OK) {
                         if (keyp) {
                                 *keyp = watch.key;
                         }
@@ -334,9 +377,7 @@ etcd_watch (etcd_session session_as_void, const char *pfx,
                 }
         }
 
-        if (post) {
-                free(post);
-        }
+        free(path);
         return res;
 }
 
@@ -356,7 +397,7 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
         node = yajl_tree_parse(ptr,NULL,0);
         if (node) {
-                value = yajl_tree_get(node,path,yajl_t_number);
+                value = my_yajl_tree_get(node,path,yajl_t_number);
                 if (value) {
                         res = ETCD_OK;
                 }
@@ -367,10 +408,32 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 }
 
 
-/* NB: a null value means to use HTTP DELETE and ignore precond/ttl */
+size_t
+parse_lock_response (void *ptr, size_t size, size_t nmemb, void *stream)
+{
+        *((char **)stream) = strdup(ptr);
+        return size*nmemb;
+}
+
+
+/* 
+ * There are two use cases, based on is_lock.
+ *
+ * If is_lock is null, we use the "keys" namespace.  A null value means an
+ * HTTP DELETE; precond and ttl are both ignored.  Otherwise we're setting a
+ * value, with *optional* precond and ttl.
+ *
+ * If is_lock is set, we use the "locks" namespace.  A null value means an
+ * HTTP DELETE as before, and we still ignore ttl as before, but now precond
+ * must be set to represent the lock index.  Otherwise ttl must be present,
+ * and we decide what to do based on precond.  If it's null, this is an
+ * initial lock so we use an HTTP POST.  Otherwise it's a renewal so we use
+ * an HTTP PUT instead.
+ */
 etcd_result
-etcd_put_one (_etcd_session *session, const char *key, const char *value,
-              const char *precond, unsigned int ttl, etcd_server *srv)
+etcd_set_one (_etcd_session *session, const char *key, const char *value,
+              const char *precond, unsigned int ttl, etcd_server *srv,
+              char **is_lock)
 {
         char                    *url;
         char                    *contents       = NULL;
@@ -378,19 +441,70 @@ etcd_put_one (_etcd_session *session, const char *key, const char *value,
         etcd_result             res             = ETCD_WTF;
         CURLcode                curl_res;
         void                    *err_label      = &&done;
+        char                    *namespace;
+        char                    *http_cmd;
+        char                    *orig_index;
 
-        if (asprintf(&url,"http://%s:%u/v2/keys/%s",
-                     srv->host,srv->port,key) < 0) {
+        if (is_lock) {
+                namespace = "mod/v2/lock";
+                if (value) {
+                        if (!ttl) {
+                                /* Lock/renew must specify ttl. */
+                                return ETCD_WTF;
+                        }
+                        http_cmd = precond ? "PUT" : "POST";
+                }
+                else {
+                        if (!precond) {
+                                /* Unlock must specify index. */
+                                return ETCD_WTF;
+                        }
+                        http_cmd = "DELETE";
+                }
+                orig_index = *is_lock;
+        }
+        else {
+                namespace = "v2/keys";
+                http_cmd = value ? "PUT" : "DELETE";
+        }
+
+        if (asprintf(&url,"http://%s:%u/%s/%s",
+                     srv->host,srv->port,namespace,key) < 0) {
                 goto *err_label;
         }
         err_label = &&free_url;
 
-        if (value) {
-                if (asprintf(&contents,"value=%s",value) < 0) {
-                        goto *err_label;
+        if (is_lock) {
+                if (precond) {
+                        if (asprintf(&contents,"index=%s",precond) < 0) {
+                                goto *err_label;
+                        }
+                        err_label = &&free_contents;
                 }
-                err_label = &&free_contents;
-
+                if (ttl) {
+                        if (contents) {
+                                char *c2;
+                                if (asprintf(&c2,"ttl=%u;%s",ttl,contents) < 0) {
+                                        goto *err_label;
+                                }
+                                free(contents);
+                                contents = c2;
+                        }
+                        else {
+                                if (asprintf(&contents,"ttl=%u",ttl) < 0) {
+                                        goto *err_label;
+                                }
+                        }
+                        err_label = &&free_contents;
+                }
+        }
+        else {
+                if (value) {
+                        if (asprintf(&contents,"value=%s",value) < 0) {
+                                goto *err_label;
+                        }
+                        err_label = &&free_contents;
+                }
                 if (precond) {
                         char *c2;
                         if (asprintf(&c2,"%s;prevValue=%s",contents,
@@ -399,8 +513,8 @@ etcd_put_one (_etcd_session *session, const char *key, const char *value,
                         }
                         free(contents);
                         contents = c2;
+                        err_label = &&free_contents;
                 }
-
                 if (ttl) {
                         char *c2;
                         if (asprintf(&c2,"%s;ttl=%u",contents,ttl) < 0) {
@@ -408,6 +522,7 @@ etcd_put_one (_etcd_session *session, const char *key, const char *value,
                         }
                         free(contents);
                         contents = c2;
+                        err_label = &&free_contents;
                 }
         }
 
@@ -418,23 +533,30 @@ etcd_put_one (_etcd_session *session, const char *key, const char *value,
         err_label = &&cleanup_curl;
 
         /* TBD: add error checking for these */
-        curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,"PUT");
+        curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,http_cmd);
         curl_easy_setopt(curl,CURLOPT_URL,url);
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_POSTREDIR,CURL_REDIR_POST_ALL);
-        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,parse_set_response);
-        curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
-        if (value) {
-                /*
-                 * CURLOPT_HTTPPOST would be easier, but it looks like etcd
-                 * will barf on that.  Sigh.
-                 */
-                curl_easy_setopt(curl,CURLOPT_POST,1L);
-                curl_easy_setopt(curl,CURLOPT_POSTFIELDS,contents);
+
+        if (is_lock && value && !precond) {
+                /* Only do this for an initial lock, not a renewal. */
+                curl_easy_setopt (curl, CURLOPT_WRITEFUNCTION,
+                                  parse_lock_response);
+                curl_easy_setopt(curl,CURLOPT_WRITEDATA,is_lock);
         }
         else {
-                /* This must be a DELETE. */
-                curl_easy_setopt(curl,CURLOPT_CUSTOMREQUEST,"DELETE");
+                curl_easy_setopt (curl, CURLOPT_WRITEFUNCTION,
+                                  parse_set_response);
+                curl_easy_setopt(curl,CURLOPT_WRITEDATA,&res);
+        }
+
+        /*
+         * CURLOPT_HTTPPOST would be easier, but it looks like etcd will barf on
+         * that.  Sigh.
+         */
+        if (contents) {
+                curl_easy_setopt(curl,CURLOPT_POST,1L);
+                curl_easy_setopt(curl,CURLOPT_POSTFIELDS,contents);
         }
 #if defined(DEBUG)
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
@@ -444,6 +566,28 @@ etcd_put_one (_etcd_session *session, const char *key, const char *value,
         if (curl_res != CURLE_OK) {
                 print_curl_error("perform",curl_res);
                 goto *err_label;
+        }
+
+        if (is_lock && value) {
+                if (!precond) {
+                        /*
+                         * If this is an initial lock, parse_lock_response would
+                         * have been unable to set "res" for us.  Instead, we
+                         * set it here if the index string got updated.
+                         */
+                        if (*is_lock != orig_index) {
+                                res = ETCD_OK;
+                        }
+                }
+                else {
+                        /*
+                         * If this is a lock renewal, then a successful call
+                         * will pass through neither parse_lock_response nor
+                         * parse_get_response.  The curl response code alone
+                         * is sufficient.
+                         */
+                        res = ETCD_OK;
+                }
         }
 
         /*
@@ -471,7 +615,7 @@ etcd_set (etcd_session session_as_void, const char *key, const char *value,
         etcd_result     res;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_put_one(session,key,value,precond,ttl,srv);
+                res = etcd_set_one(session,key,value,precond,ttl,srv,NULL);
                 /*
                  * Protocol errors are likely to be things like precondition
                  * failures, which won't be helped by retrying on another
@@ -501,7 +645,7 @@ etcd_delete (etcd_session session_as_void, const char *key)
         etcd_result     res;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_put_one(session,key,NULL,NULL,0,srv);
+                res = etcd_set_one(session,key,NULL,NULL,0,srv,NULL);
                 if (res == ETCD_OK) {
                         break;
                 }
@@ -511,6 +655,46 @@ etcd_delete (etcd_session session_as_void, const char *key)
 }
 
 
+etcd_result
+etcd_lock (etcd_session session_as_void, char *key, unsigned int ttl,
+           char *index_in, char **index_out)
+{
+        _etcd_session   *session        = session_as_void;
+        etcd_server     *srv;
+        etcd_result     res;
+        char            *tmp            = NULL;
+
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_set_one(session,key,"hack",index_in,ttl,srv,&tmp);
+                if (res == ETCD_OK) {
+                        if (index_out) {
+                                *index_out = tmp;
+                        }
+                        break;
+                }
+        }
+
+        return res;
+}
+
+
+etcd_result
+etcd_unlock (etcd_session session_as_void, char *key, char *index)
+{
+        _etcd_session   *session   = session_as_void;
+        etcd_server     *srv;
+        etcd_result     res;
+        char            *tmp            = NULL;
+
+        for (srv = session->servers; srv->host; ++srv) {
+                res = etcd_set_one(session,key,NULL,index,0,srv,&tmp);
+                if (res == ETCD_OK) {
+                        break;
+                }
+        }
+
+        return res;
+}
 size_t
 store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
 {
