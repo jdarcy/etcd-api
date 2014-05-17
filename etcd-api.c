@@ -246,7 +246,6 @@ etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const c
                      srv->host,srv->port,prefix,key) < 0) {
                 goto *err_label;
         }
-        printf("url = %s\n",url);
         err_label = &&free_url;
 
         curl = curl_easy_init();
