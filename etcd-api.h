@@ -42,6 +42,18 @@ typedef struct {
         unsigned short  port;
 } etcd_server;
 
+
+struct etcd_tree;
+
+typedef struct etcd_tree {
+	char *key;
+	char *value;
+	int isDir;
+	int createdIndex;
+	int modifiedIndex;
+	struct etcd_tree **nodes;
+} etcd_tree;
+
 typedef void *etcd_session;
 
 /*
@@ -212,3 +224,23 @@ etcd_result     etcd_lock (etcd_session session_as_void, char *key,
 etcd_result     etcd_unlock (etcd_session session_as_void, char *key,
                              char *index);
 
+/*
+ * etcd_list_free
+ *
+ * Frees a tree retuend by etcd_list.
+ */
+void etcd_list_free(etcd_tree **tree);
+
+/*
+ * etcd_tree
+ *
+ * Return a tree listing of the children of the specified key.
+ *
+ *      key
+ *      The path to return a tree for.
+ *
+ *      tree
+ *      The returned tree, free with etcd_list_free.
+ */
+etcd_result     etcd_list(etcd_session session_as_void, const char *key,
+                          etcd_tree **tree);
