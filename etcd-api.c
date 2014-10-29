@@ -57,6 +57,7 @@ int             g_inited        = 0;
 const char      *value_path[]   = { "node", "value", NULL };
 const char      *nodes_path[]   = { "node", "nodes", NULL };
 const char      *entry_path[]   = { "key", NULL };
+const char      *node_path[]   = { "node", NULL };
 
 /*
  * We only call this in case where it should be safe, but gcc doesn't know
@@ -232,8 +233,8 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 etcd_result
-etcd_get_one (_etcd_session *session, char *key, etcd_server *srv, char *prefix,
-              char *post, curl_callback_t cb, char **stream)
+etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const char *prefix,
+              const char *post, curl_callback_t cb, char **stream)
 {
         char            *url;
         CURL            *curl;
@@ -284,7 +285,7 @@ done:
 
 
 char *
-etcd_get (etcd_session session_as_void, char *key)
+etcd_get (etcd_session session_as_void, const char *key)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
@@ -335,7 +336,7 @@ parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 etcd_result
-etcd_watch (etcd_session session_as_void, char *pfx,
+etcd_watch (etcd_session session_as_void, const char *pfx,
             char **keyp, char **valuep, int *index_in, int *index_out)
 {
         _etcd_session   *session   = session_as_void;
@@ -430,8 +431,8 @@ parse_lock_response (void *ptr, size_t size, size_t nmemb, void *stream)
  * an HTTP PUT instead.
  */
 etcd_result
-etcd_set_one (_etcd_session *session, char *key, char *value,
-              char *precond, unsigned int ttl, etcd_server *srv,
+etcd_set_one (_etcd_session *session, const char *key, const char *value,
+              const char *precond, unsigned int ttl, etcd_server *srv,
               char **is_lock)
 {
         char                    *url;
@@ -606,8 +607,8 @@ done:
 
 
 etcd_result
-etcd_set (etcd_session session_as_void, char *key, char *value,
-          char *precond, unsigned int ttl)
+etcd_set (etcd_session session_as_void, const char *key, const char *value,
+          const char *precond, unsigned int ttl)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
@@ -637,7 +638,7 @@ etcd_set (etcd_session session_as_void, char *key, char *value,
  * value with a TTL, but I haven't actually tried it.
  */
 etcd_result
-etcd_delete (etcd_session session_as_void, char *key)
+etcd_delete (etcd_session session_as_void, const char *key)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
@@ -827,4 +828,139 @@ etcd_close_str (etcd_session session)
 {
         free_sl(((_etcd_session *)session)->servers);
         etcd_close(session);
+}
+
+void etcd_list_free(etcd_tree **tree) {
+	if (tree == NULL || *tree == NULL) {
+		return;
+	}
+
+	free((*tree)->key);
+	if ((*tree)->value != NULL) free((*tree)->value);
+
+	if ((*tree)->isDir) {
+		etcd_tree **iter = (*tree)->nodes;
+		while (iter != NULL && *iter != NULL) {
+			etcd_list_free(iter++);
+		}
+		free((*tree)->nodes);
+	}
+
+	free(*tree);
+}
+
+void
+parse_list_response_inner(etcd_tree *tree, yajl_val node) {
+	int i;
+	tree->value = NULL;
+	tree->nodes = NULL;
+	tree->isDir = yajl_t_false;
+	for (i = 0; i < node->u.object.len; ++i) {
+		const char *key = node->u.object.keys[i];
+		yajl_val value = node->u.object.values[i];
+		if (strcmp(key, "key") == 0 && YAJL_IS_STRING(value)) {
+			tree->key = strdup(MY_YAJL_GET_STRING(value));
+		} else if (strcmp(key, "dir") == 0) {
+			tree->isDir = YAJL_IS_TRUE(value);
+		} else if (strcmp(key, "modifiedIndex") == 0 && YAJL_IS_INTEGER(value)) {
+			tree->modifiedIndex = YAJL_GET_INTEGER(value);
+		} else if (strcmp(key, "createdIndex") == 0 && YAJL_IS_INTEGER(value)) {
+			tree->createdIndex = YAJL_GET_INTEGER(value);
+		} else if (strcmp(key, "value") == 0 && YAJL_IS_STRING(value)) {
+			tree->value = strdup(MY_YAJL_GET_STRING(value));
+		} else if (strcmp(key, "nodes") == 0 && YAJL_IS_ARRAY(value)) {
+			tree->nodes = malloc((value->u.array.len+1)*sizeof(struct etcd_tree*));
+			tree->nodes[value->u.array.len] = NULL;
+			int j;
+			for (j = 0; j < value->u.array.len; ++j) {
+				tree->nodes[j] = malloc(sizeof(struct etcd_tree));
+				parse_list_response_inner(tree->nodes[j], value->u.array.values[j]);
+			}
+		}
+	}
+}
+
+size_t
+parse_list_response (void *ptr, size_t size, size_t nmemb, void *void_tree) {
+	etcd_tree **tree = (etcd_tree**) void_tree;
+	yajl_val node;
+	yajl_val value;
+
+	// TODO is this ptr null terminated?
+	node = yajl_tree_parse(ptr, NULL, 0);
+
+	if (node) {
+		// We have a result to send back
+		value = my_yajl_tree_get(node, node_path, yajl_t_object);
+		if (value && YAJL_IS_OBJECT(value)) {
+			*tree = malloc(sizeof(etcd_tree));
+			parse_list_response_inner(*tree, value);
+		}
+	}
+
+	return size*nmemb;
+}
+
+etcd_result
+etcd_get_many (_etcd_session *session, const char *key, etcd_server *srv, const char *prefix,
+               curl_callback_t cb, etcd_tree **tree)
+{
+	char            *url;
+	CURL            *curl;
+	CURLcode        curl_res;
+	etcd_result     res             = ETCD_WTF;
+	void            *err_label      = &&done;
+
+	if (asprintf(&url,"http://%s:%u/v2/%s%s?recursive=true",
+				srv->host,srv->port,prefix,key) < 0) {
+		goto *err_label;
+	}
+	err_label = &&free_url;
+
+	curl = curl_easy_init();
+	if (!curl) {
+		goto *err_label;
+	}
+	err_label = &&cleanup_curl;
+
+	/* TBD: add error checking for these */
+	curl_easy_setopt(curl,CURLOPT_URL,url);
+	curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
+	curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,cb);
+	curl_easy_setopt(curl,CURLOPT_WRITEDATA,tree);
+#if defined(DEBUG)
+	curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
+#endif
+
+	curl_res = curl_easy_perform(curl);
+	if (curl_res != CURLE_OK) {
+		print_curl_error("perform",curl_res);
+		goto *err_label;
+	}
+
+	res = ETCD_OK;
+
+cleanup_curl:
+	curl_easy_cleanup(curl);
+free_url:
+	free(url);
+done:
+	return res;
+}
+
+etcd_result
+etcd_list(etcd_session session_as_void, const char *key,
+          etcd_tree **tree) {
+	_etcd_session   *session   = session_as_void;
+	etcd_server     *srv;
+	etcd_result     res = ETCD_WTF;
+	
+	for (srv = session->servers; srv->host; ++srv) {
+		res = etcd_get_many(session, key, srv, "keys/", parse_list_response, tree);
+		if (res == ETCD_OK) {
+			return res;
+		}
+	}
+
+	return res;
 }

@@ -1,3 +1,4 @@
+#pragma once
 /*
  * Copyright (c) 2013, Red Hat
  * All rights reserved.
@@ -41,6 +42,18 @@ typedef struct {
         char            *host;
         unsigned short  port;
 } etcd_server;
+
+
+struct etcd_tree;
+
+typedef struct etcd_tree {
+	char *key;
+	char *value;
+	int isDir;
+	int createdIndex;
+	int modifiedIndex;
+	struct etcd_tree **nodes;
+} etcd_tree;
 
 typedef void *etcd_session;
 
@@ -94,7 +107,7 @@ void            etcd_close_str  (etcd_session session);
  *      key
  *      The etcd key (path) to fetch.
  */
-char *          etcd_get (etcd_session session, char *key);
+char *          etcd_get (etcd_session session, const char *key);
 
 
 /*
@@ -125,7 +138,7 @@ char *          etcd_get (etcd_session session, char *key);
  * the next.  It's entirely legitimate to point both at the same variable.
  */
 
-etcd_result     etcd_watch (etcd_session session, char *pfx,
+etcd_result     etcd_watch (etcd_session session, const char *pfx,
                             char **keyp, char **valuep,
                             int *index_in, int *index_out);
 
@@ -151,8 +164,8 @@ etcd_result     etcd_watch (etcd_session session, char *pfx,
  *      deleted, or zero to mean no auto-expiration.
  */
 
-etcd_result     etcd_set        (etcd_session session, char *key, char *value,
-                                 char *precond, unsigned int ttl);
+etcd_result     etcd_set        (etcd_session session, const char *key, const char *value,
+                                 const char *precond, unsigned int ttl);
 
 
 /*
@@ -164,7 +177,7 @@ etcd_result     etcd_set        (etcd_session session, char *key, char *value,
  *      The etcd key (path) to delete.
  */
 
-etcd_result     etcd_delete     (etcd_session session, char *key);
+etcd_result     etcd_delete     (etcd_session session, const char *key);
 
 
 /*
@@ -212,3 +225,23 @@ etcd_result     etcd_lock (etcd_session session_as_void, char *key,
 etcd_result     etcd_unlock (etcd_session session_as_void, char *key,
                              char *index);
 
+/*
+ * etcd_list_free
+ *
+ * Frees a tree retuend by etcd_list.
+ */
+void etcd_list_free(etcd_tree **tree);
+
+/*
+ * etcd_tree
+ *
+ * Return a tree listing of the children of the specified key.
+ *
+ *      key
+ *      The path to return a tree for.
+ *
+ *      tree
+ *      The returned tree, free with etcd_list_free.
+ */
+etcd_result     etcd_list(etcd_session session_as_void, const char *key,
+                          etcd_tree **tree);
