@@ -1,3 +1,4 @@
+#pragma once
 /*
  * Copyright (c) 2013, Red Hat
  * All rights reserved.
