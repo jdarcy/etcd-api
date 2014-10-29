@@ -854,6 +854,7 @@ parse_list_response_inner(etcd_tree *tree, yajl_val node) {
 	int i;
 	tree->value = NULL;
 	tree->nodes = NULL;
+	tree->isDir = yajl_t_false;
 	for (i = 0; i < node->u.object.len; ++i) {
 		const char *key = node->u.object.keys[i];
 		yajl_val value = node->u.object.values[i];
