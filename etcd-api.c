@@ -697,7 +697,18 @@ etcd_unlock (etcd_session session_as_void, char *key, char *index)
 static size_t
 store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
 {
-        *((char **)stream) = strdup(ptr);
+        yajl_val                node;
+        yajl_val                value;
+        static const char       *path[] = { "leader", NULL };
+
+        node = yajl_tree_parse(ptr,NULL,0);
+        if (node) {
+                value = my_yajl_tree_get(node,path,yajl_t_string);
+                if (value) {
+                        *((char **)stream) = strdup(MY_YAJL_GET_STRING(value));
+                }
+        }
+
         return size * nmemb;
 }
 
@@ -711,7 +722,7 @@ etcd_leader (etcd_session session_as_void)
         char            *value     = NULL;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_get_one(session,"leader",srv,"",NULL,
+                res = etcd_get_one(session,"stats/leader",srv,"",NULL,
                                    store_leader,&value);
                 if ((res == ETCD_OK) && value) {
                         return value;
