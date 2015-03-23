@@ -62,12 +62,12 @@ const char      *entry_path[]   = { "key", NULL };
  * We only call this in case where it should be safe, but gcc doesn't know
  * that so we use this to shut it up.
  */
-char *
+static char *
 MY_YAJL_GET_STRING (yajl_val x)
 {
         char *y = YAJL_GET_STRING(x);
 
-        return y ? y : "bogus";
+        return y ? y : (char *)"bogus";
 }
 
 #if defined(DEBUG)
@@ -122,7 +122,7 @@ etcd_close (etcd_session session)
  * TBD: see if common distros are packaging a JSON library that isn't total
  * crap.
  */
-yajl_val
+static yajl_val
 my_yajl_tree_get (yajl_val root, char const **path, yajl_type type)
 {
         yajl_val        obj    = root;
@@ -158,7 +158,7 @@ my_yajl_tree_get (yajl_val root, char const **path, yajl_type type)
  * elements of an array.  I tried using yajl_tree_get with an index in the
  * path, either as a type-casted integer or as a string, but that didn't work.
  */
-char *
+static char *
 parse_array_response (yajl_val parent)
 {
         size_t          i;
@@ -200,7 +200,7 @@ parse_array_response (yajl_val parent)
         return retval;
 }
 
-size_t
+static size_t
 parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
         yajl_val        node;
@@ -231,9 +231,9 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 }
 
 
-etcd_result
-etcd_get_one (_etcd_session *session, char *key, etcd_server *srv, char *prefix,
-              char *post, curl_callback_t cb, char **stream)
+static etcd_result
+etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const char *prefix,
+              const char *post, curl_callback_t cb, char **stream)
 {
         char            *url;
         CURL            *curl;
@@ -292,7 +292,7 @@ etcd_get (etcd_session session_as_void, char *key)
         char            *value  = NULL;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_get_one(session,key,srv,"keys/",NULL,
+                res = etcd_get_one(session,key,srv, (const char *)"keys/",NULL,
                                    parse_get_response,&value);
                 if ((res == ETCD_OK) && value) {
                         return value;
@@ -303,7 +303,7 @@ etcd_get (etcd_session session_as_void, char *key)
 }
 
 
-size_t
+static size_t
 parse_watch_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
         yajl_val                node;
@@ -340,9 +340,9 @@ etcd_watch (etcd_session session_as_void, char *pfx,
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
-        etcd_result     res;
+        etcd_result     res = ETCD_WTF;
         etcd_watch_t    watch;
-        char            *path;
+        char            *path = NULL;
 
         if (index_in) {
                 if (asprintf(&path,"%s?wait=true&recursive=true&waitIndex=%d",
@@ -381,7 +381,7 @@ etcd_watch (etcd_session session_as_void, char *pfx,
 }
 
 
-size_t
+static size_t
 parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
         yajl_val        node;
@@ -406,8 +406,7 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
         return size*nmemb;
 }
 
-
-size_t
+static size_t
 parse_lock_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
         *((char **)stream) = strdup(ptr);
@@ -429,42 +428,42 @@ parse_lock_response (void *ptr, size_t size, size_t nmemb, void *stream)
  * initial lock so we use an HTTP POST.  Otherwise it's a renewal so we use
  * an HTTP PUT instead.
  */
-etcd_result
-etcd_set_one (_etcd_session *session, char *key, char *value,
-              char *precond, unsigned int ttl, etcd_server *srv,
+static etcd_result
+etcd_set_one (_etcd_session *session, const char *key, const char *value,
+              const char *precond, unsigned int ttl, etcd_server *srv,
               char **is_lock)
 {
-        char                    *url;
+        char                    *url = NULL;
         char                    *contents       = NULL;
-        CURL                    *curl;
+        CURL                    *curl           = NULL;
         etcd_result             res             = ETCD_WTF;
         CURLcode                curl_res;
         void                    *err_label      = &&done;
-        char                    *namespace;
-        char                    *http_cmd;
-        char                    *orig_index;
+        char                    *namespace = NULL;
+        char                    *http_cmd = NULL;
+        char                    *orig_index = NULL;
 
         if (is_lock) {
-                namespace = "mod/v2/lock";
+          namespace = (char *)"mod/v2/lock";
                 if (value) {
                         if (!ttl) {
                                 /* Lock/renew must specify ttl. */
                                 return ETCD_WTF;
                         }
-                        http_cmd = precond ? "PUT" : "POST";
+                        http_cmd = precond ? (char *)"PUT" : (char *)"POST";
                 }
                 else {
                         if (!precond) {
                                 /* Unlock must specify index. */
                                 return ETCD_WTF;
                         }
-                        http_cmd = "DELETE";
+                        http_cmd = (char *)"DELETE";
                 }
                 orig_index = *is_lock;
         }
         else {
-                namespace = "v2/keys";
-                http_cmd = value ? "PUT" : "DELETE";
+                namespace = (char *)"v2/keys";
+                http_cmd = value ? (char *)"PUT" : (char *)"DELETE";
         }
 
         if (asprintf(&url,"http://%s:%u/%s/%s",
@@ -611,7 +610,7 @@ etcd_set (etcd_session session_as_void, char *key, char *value,
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
-        etcd_result     res;
+        etcd_result     res = ETCD_WTF;
 
         for (srv = session->servers; srv->host; ++srv) {
                 res = etcd_set_one(session,key,value,precond,ttl,srv,NULL);
@@ -641,7 +640,7 @@ etcd_delete (etcd_session session_as_void, char *key)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
-        etcd_result     res;
+        etcd_result     res        = ETCD_WTF;
 
         for (srv = session->servers; srv->host; ++srv) {
                 res = etcd_set_one(session,key,NULL,NULL,0,srv,NULL);
@@ -660,7 +659,7 @@ etcd_lock (etcd_session session_as_void, char *key, unsigned int ttl,
 {
         _etcd_session   *session        = session_as_void;
         etcd_server     *srv;
-        etcd_result     res;
+        etcd_result     res             = ETCD_WTF;
         char            *tmp            = NULL;
 
         for (srv = session->servers; srv->host; ++srv) {
@@ -682,8 +681,8 @@ etcd_unlock (etcd_session session_as_void, char *key, char *index)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
-        etcd_result     res;
-        char            *tmp            = NULL;
+        etcd_result     res        = ETCD_WTF;
+        char            *tmp       = NULL;
 
         for (srv = session->servers; srv->host; ++srv) {
                 res = etcd_set_one(session,key,NULL,index,0,srv,&tmp);
@@ -694,7 +693,8 @@ etcd_unlock (etcd_session session_as_void, char *key, char *index)
 
         return res;
 }
-size_t
+
+static size_t
 store_leader (void *ptr, size_t size, size_t nmemb, void *stream)
 {
         *((char **)stream) = strdup(ptr);
@@ -707,8 +707,8 @@ etcd_leader (etcd_session session_as_void)
 {
         _etcd_session   *session   = session_as_void;
         etcd_server     *srv;
-        etcd_result     res;
-        char            *value  = NULL;
+        etcd_result     res        = ETCD_WTF;
+        char            *value     = NULL;
 
         for (srv = session->servers; srv->host; ++srv) {
                 res = etcd_get_one(session,"leader",srv,"",NULL,
@@ -722,7 +722,7 @@ etcd_leader (etcd_session session_as_void)
 }
 
 
-void
+static void
 free_sl (etcd_server *server_list)
 {
         size_t          num_servers;
@@ -734,13 +734,13 @@ free_sl (etcd_server *server_list)
 }
 
 
-int
-_count_matching (char *text, char *cset, int result)
+static int
+_count_matching (const char *text, const char *cset, int result)
 {
         char    *t;
         int     res     = 0;
 
-        for (t = text; *t; ++t) {
+        for (t = (char *)text; *t; ++t) {
                 if ((strchr(cset,*t) != NULL) != result) {
                         break;
                 }
