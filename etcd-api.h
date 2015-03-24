@@ -194,7 +194,7 @@ char *          etcd_leader     (etcd_session session);
  *      Place for the new lock index.  You must free this.
  */
 
-etcd_result     etcd_lock (etcd_session session_as_void, char *key,
+etcd_result     etcd_lock (etcd_session session_as_void, char *key, char *value,
                            unsigned int ttl, char *index_in, char **index_out);
 
 /*

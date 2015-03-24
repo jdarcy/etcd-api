@@ -80,6 +80,20 @@ print_curl_error (char *intro, CURLcode res)
 #define print_curl_error(intro,res)
 #endif
 
+static int
+debug_trace(CURL *handle, curl_infotype type,
+         char *data, size_t size,
+         void *userp)
+{
+  const char *text;
+  (void)handle;
+
+  if (data)
+    printf("%s\n", data);
+
+  return 0;
+
+}
  
 etcd_session
 etcd_open (etcd_server *server_list)
@@ -232,8 +246,9 @@ parse_get_response (void *ptr, size_t size, size_t nmemb, void *stream)
 
 
 static etcd_result
-etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const char *prefix,
-              const char *post, curl_callback_t cb, char **stream)
+etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv,
+              const char *prefix, const char *post, curl_callback_t cb,
+              char **stream)
 {
         char            *url;
         CURL            *curl;
@@ -241,7 +256,7 @@ etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const c
         etcd_result     res             = ETCD_WTF;
         void            *err_label      = &&done;
 
-        if (asprintf(&url,"http://%s:%u/v2/%s%s",
+        if (asprintf(&url,"http://%s:%u/v2/%s%s?consistent=true",
                      srv->host,srv->port,prefix,key) < 0) {
                 goto *err_label;
         }
@@ -264,6 +279,7 @@ etcd_get_one (_etcd_session *session, const char *key, etcd_server *srv, const c
         }
 #if defined(DEBUG)
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
+        curl_easy_setopt(curl,CURLOPT_DEBUGFUNCTION, debug_trace);
 #endif
 
         curl_res = curl_easy_perform(curl);
@@ -409,7 +425,28 @@ parse_set_response (void *ptr, size_t size, size_t nmemb, void *stream)
 static size_t
 parse_lock_response (void *ptr, size_t size, size_t nmemb, void *stream)
 {
-        *((char **)stream) = strdup(ptr);
+        yajl_val        node;
+        yajl_val        value;
+        etcd_result     res     = ETCD_PROTOCOL_ERROR;
+
+        /*
+         * Success responses contain prevValue and index.  Failure responses
+         * contain errorCode and cause.  Among all these, index seems to be the
+         * one we're most likely to need later, so look for that.
+         */
+        static const char       *path[] = { "node", "modifiedIndex", NULL };
+
+        node = yajl_tree_parse(ptr,NULL,0);
+        if (node) {
+                value = my_yajl_tree_get(node,path,yajl_t_number);
+                if (value) {
+                        *((char **)stream) = strdup(YAJL_GET_NUMBER(value));
+                } else {
+                        *((char **)stream) = NULL;
+                }
+                yajl_tree_free(node);
+        }
+
         return size*nmemb;
 }
 
@@ -441,28 +478,25 @@ etcd_set_one (_etcd_session *session, const char *key, const char *value,
         void                    *err_label      = &&done;
         char                    *namespace = NULL;
         char                    *http_cmd = NULL;
-        char                    *orig_index = NULL;
+
+        namespace = (char *)"v2/keys";
 
         if (is_lock) {
-          namespace = (char *)"mod/v2/lock";
                 if (value) {
                         if (!ttl) {
                                 /* Lock/renew must specify ttl. */
                                 return ETCD_WTF;
                         }
-                        http_cmd = precond ? (char *)"PUT" : (char *)"POST";
-                }
-                else {
+                        http_cmd = (char *)"PUT";
+                } else {
                         if (!precond) {
                                 /* Unlock must specify index. */
                                 return ETCD_WTF;
                         }
                         http_cmd = (char *)"DELETE";
                 }
-                orig_index = *is_lock;
         }
         else {
-                namespace = (char *)"v2/keys";
                 http_cmd = value ? (char *)"PUT" : (char *)"DELETE";
         }
 
@@ -473,16 +507,49 @@ etcd_set_one (_etcd_session *session, const char *key, const char *value,
         err_label = &&free_url;
 
         if (is_lock) {
-                if (precond) {
-                        if (asprintf(&contents,"index=%s",precond) < 0) {
+                if (value) {
+                        if (asprintf(&contents,"value=%s",value) < 0) {
                                 goto *err_label;
+                        }
+                        err_label = &&free_contents;
+                }
+                if (precond) {
+                        if (contents) {
+                                char *c2;
+                                if (asprintf(&c2,"prevIndex=%s;%s",precond,
+                                             contents) < 0) {
+                                        goto *err_label;
+                                }
+                                free(contents);
+                                contents = c2;
+                        } else {
+                                if (asprintf(&contents,"prevIndex=%s",
+                                             precond) < 0) {
+                                        goto *err_label;
+                                }
+                        }
+                        err_label = &&free_contents;
+                } else {
+                        if (contents) {
+                                char *c2;
+                                if (asprintf(&c2,"prevExist=false;%s",
+                                             contents) < 0) {
+                                        goto *err_label;
+                                }
+                                free(contents);
+                                contents = c2;
+                        } else {
+                                if (asprintf(&contents,"prevExist=false") < 0) {
+                                        goto *err_label;
+                                }
                         }
                         err_label = &&free_contents;
                 }
                 if (ttl) {
                         if (contents) {
                                 char *c2;
-                                if (asprintf(&c2,"ttl=%u;%s",ttl,contents) < 0) {
+                                if (asprintf(&c2,"ttl=%u;%s",ttl,
+                                             contents) < 0) {
                                         goto *err_label;
                                 }
                                 free(contents);
@@ -536,8 +603,7 @@ etcd_set_one (_etcd_session *session, const char *key, const char *value,
         curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
         curl_easy_setopt(curl,CURLOPT_POSTREDIR,CURL_REDIR_POST_ALL);
 
-        if (is_lock && value && !precond) {
-                /* Only do this for an initial lock, not a renewal. */
+        if (is_lock) {
                 curl_easy_setopt (curl, CURLOPT_WRITEFUNCTION,
                                   parse_lock_response);
                 curl_easy_setopt(curl,CURLOPT_WRITEDATA,is_lock);
@@ -558,6 +624,7 @@ etcd_set_one (_etcd_session *session, const char *key, const char *value,
         }
 #if defined(DEBUG)
         curl_easy_setopt(curl,CURLOPT_VERBOSE,1L);
+        curl_easy_setopt(curl,CURLOPT_DEBUGFUNCTION, debug_trace);
 #endif
 
         curl_res = curl_easy_perform(curl);
@@ -566,25 +633,13 @@ etcd_set_one (_etcd_session *session, const char *key, const char *value,
                 goto *err_label;
         }
 
-        if (is_lock && value) {
+        if (is_lock) {
                 if (!precond) {
-                        /*
-                         * If this is an initial lock, parse_lock_response would
-                         * have been unable to set "res" for us.  Instead, we
-                         * set it here if the index string got updated.
-                         */
-                        if (*is_lock != orig_index) {
+                        if (*is_lock)
                                 res = ETCD_OK;
-                        }
-                }
-                else {
-                        /*
-                         * If this is a lock renewal, then a successful call
-                         * will pass through neither parse_lock_response nor
-                         * parse_get_response.  The curl response code alone
-                         * is sufficient.
-                         */
-                        res = ETCD_OK;
+                } else {
+                        if (*is_lock)
+                                res = ETCD_OK;
                 }
         }
 
@@ -654,8 +709,8 @@ etcd_delete (etcd_session session_as_void, char *key)
 
 
 etcd_result
-etcd_lock (etcd_session session_as_void, char *key, unsigned int ttl,
-           char *index_in, char **index_out)
+etcd_lock (etcd_session session_as_void, char *key, char *value,
+           unsigned int ttl, char *index_in, char **index_out)
 {
         _etcd_session   *session        = session_as_void;
         etcd_server     *srv;
@@ -663,7 +718,7 @@ etcd_lock (etcd_session session_as_void, char *key, unsigned int ttl,
         char            *tmp            = NULL;
 
         for (srv = session->servers; srv->host; ++srv) {
-                res = etcd_set_one(session,key,"hack",index_in,ttl,srv,&tmp);
+                res = etcd_set_one(session,key, value,index_in,ttl,srv,&tmp);
                 if (res == ETCD_OK) {
                         if (index_out) {
                                 *index_out = tmp;
